@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MARK XLIX — Project Report</title>
+<style>
+  :root {
+    --bg: #0a0e14;
+    --bg2: #0f1520;
+    --card: #131b29;
+    --card2: #182234;
+    --border: #223048;
+    --text: #dbe4f0;
+    --muted: #8b9cb8;
+    --accent: #00d4ff;
+    --accent2: #ffb347;
+    --green: #4ade80;
+    --red: #f87171;
+    --purple: #c084fc;
+    --mono: "Cascadia Code", "Consolas", "JetBrains Mono", monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    line-height: 1.65;
+  }
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 0 24px 80px; }
+
+  /* ── Hero ─────────────────────────────── */
+  .hero {
+    position: relative;
+    padding: 64px 24px 48px;
+    text-align: center;
+    background:
+      radial-gradient(800px 300px at 50% -80px, rgba(0,212,255,.14), transparent 70%),
+      linear-gradient(180deg, #0b1119 0%, var(--bg) 100%);
+    border-bottom: 1px solid var(--border);
+    overflow: hidden;
+  }
+  .hero::before {
+    content: "";
+    position: absolute; inset: 0;
+    background:
+      repeating-linear-gradient(0deg, transparent 0 2px, rgba(0,212,255,.03) 2px 3px);
+    pointer-events: none;
+  }
+  .hero .tag {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: .35em;
+    color: var(--accent);
+    border: 1px solid rgba(0,212,255,.35);
+    padding: 6px 16px 6px 20px;
+    border-radius: 999px;
+    margin-bottom: 22px;
+    background: rgba(0,212,255,.06);
+  }
+  .hero h1 {
+    font-size: clamp(34px, 6vw, 56px);
+    font-weight: 800;
+    letter-spacing: .02em;
+    background: linear-gradient(92deg, #fff 20%, var(--accent) 90%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .hero .sub {
+    margin-top: 12px;
+    color: var(--muted);
+    font-size: clamp(15px, 2.4vw, 18px);
+    max-width: 720px;
+    margin-inline: auto;
+  }
+  .hero .meta {
+    margin-top: 26px;
+    display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;
+  }
+  .chip {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--text);
+    background: var(--card);
+    border: 1px solid var(--border);
+    padding: 6px 14px;
+    border-radius: 8px;
+  }
+  .chip b { color: var(--accent); font-weight: 600; }
+
+  /* ── Sections ─────────────────────────── */
+  section { margin-top: 56px; }
+  h2 {
+    font-size: 24px;
+    font-weight: 700;
+    display: flex; align-items: center; gap: 12px;
+    margin-bottom: 18px;
+  }
+  h2 .num {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--accent);
+    border: 1px solid rgba(0,212,255,.4);
+    border-radius: 7px;
+    padding: 3px 9px;
+    background: rgba(0,212,255,.07);
+    white-space: nowrap;
+  }
+  h3 { font-size: 17px; margin: 26px 0 10px; color: #eaf2fc; }
+  p { color: var(--text); }
+  p.muted, .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 20px 22px;
+  }
+  .grid { display: grid; gap: 14px; }
+  .grid2 { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  .grid3 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+
+  /* Stat tiles */
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; }
+  .stat {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px;
+    text-align: center;
+    transition: transform .18s ease, border-color .18s ease;
+  }
+  .stat:hover { transform: translateY(-3px); border-color: rgba(0,212,255,.5); }
+  .stat .v { font-size: 30px; font-weight: 800; color: var(--accent); font-family: var(--mono); }
+  .stat .l { font-size: 12.5px; color: var(--muted); margin-top: 4px; letter-spacing: .05em; text-transform: uppercase; }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; font-size: 14.5px; }
+  th {
+    text-align: left;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--muted);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 12px;
+  }
+  td { padding: 11px 12px; border-bottom: 1px solid rgba(34,48,72,.6); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  td:first-child { font-family: var(--mono); font-size: 13.5px; color: var(--accent); white-space: nowrap; }
+  tbody tr { transition: background .15s ease; }
+  tbody tr:hover { background: rgba(0,212,255,.04); }
+  .desc { color: var(--muted); font-size: 13.5px; }
+
+  /* Tree */
+  .tree {
+    font-family: var(--mono);
+    font-size: 13px;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px 20px;
+    overflow-x: auto;
+    line-height: 1.75;
+    color: #b9c8dc;
+  }
+  .tree .dir { color: var(--accent); }
+  .tree .cmt { color: #5a6b84; }
+
+  /* Code inline */
+  code {
+    font-family: var(--mono);
+    background: var(--card2);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 1px 6px;
+    font-size: 12.8px;
+    color: #ffd9a0;
+  }
+
+  /* Lists */
+  ul.clean { list-style: none; }
+  ul.clean li { padding-left: 22px; position: relative; margin-bottom: 9px; }
+  ul.clean li::before {
+    content: "▹";
+    position: absolute; left: 2px;
+    color: var(--accent);
+  }
+
+  .badge {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 5px;
+    border: 1px solid;
+    margin-left: 6px;
+    vertical-align: 1px;
+  }
+  .b-green  { color: var(--green);  border-color: rgba(74,222,128,.4);  background: rgba(74,222,128,.08); }
+  .b-purple { color: var(--purple); border-color: rgba(192,132,252,.4); background: rgba(192,132,252,.08); }
+  .b-amber  { color: var(--accent2); border-color: rgba(255,179,71,.4); background: rgba(255,179,71,.08); }
+
+  /* Bars */
+  .bar-row { margin-bottom: 12px; }
+  .bar-top { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 5px; }
+  .bar-top span:first-child { color: #c9d6e8; }
+  .bar-top span:last-child { font-family: var(--mono); color: var(--muted); }
+  .bar { height: 7px; background: var(--card2); border-radius: 4px; overflow: hidden; }
+  .bar i { display: block; height: 100%; border-radius: 4px; background: linear-gradient(90deg, var(--accent), #4a9eff); }
+
+  footer {
+    margin-top: 72px;
+    text-align: center;
+    color: #5a6b84;
+    font-size: 13px;
+    border-top: 1px solid var(--border);
+    padding-top: 26px;
+  }
+  .footer-note { font-family: var(--mono); font-size: 12px; margin-top: 6px; color: #4a5a72; }
+
+  @media (max-width: 620px) {
+    .hero { padding: 44px 16px 36px; }
+    td:first-child { white-space: normal; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ══════════════ HERO ══════════════ -->
+<header class="hero">
+  <div class="tag">PROJECT REPORT</div>
+  <h1>MARK XLIX</h1>
+  <p class="sub">The Ultimate Cross-Platform Personal AI Assistant — a real-time voice AI that can <b>hear</b>, <b>see</b>, <b>understand</b>, and <b>control</b> your computer on Windows, macOS &amp; Linux. Built by FatihMakes on the Gemini Live API.</p>
+  <div class="meta">
+    <span class="chip">Engine <b>Gemini Live</b></span>
+    <span class="chip">UI <b>PyQt6</b></span>
+    <span class="chip">OS <b>Win · macOS · Linux</b></span>
+    <span class="chip">Voice <b>Charon</b></span>
+    <span class="chip">Python <b>3.11 / 3.12</b></span>
+    <span class="chip">License <b>CC BY-NC 4.0</b></span>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <!-- ══════════════ EXEC SUMMARY ══════════════ -->
+  <section>
+    <h2><span class="num">01</span> Executive Summary</h2>
+    <div class="card">
+      <p>MARK XLIX is a <b>JARVIS-style desktop voice assistant</b>. Instead of a wake-and-respond chatbot, it maintains an <b>always-on Gemini Live audio session</b>: the microphone streams continuously, the assistant's voice answers with ultra-low latency, and a library of <b>22 voice-invokable tools</b> gives it real control over the machine — launching apps, controlling browsers, managing files, checking hardware telemetry, setting reminders, searching the web, and even reading the screen through live vision.</p>
+      <p style="margin-top:10px">The build philosophy of XLIX is <i>personalization &amp; autonomy</i>: it learns your name, remembers long-term facts, starts itself on boot, watches the clipboard, and adapts to the language you speak. The next milestone (<b>Mark L</b>) adds wake-word, a smarter proactive system, and daily session memory.</p>
+    </div>
+
+    <div class="stats" style="margin-top:16px">
+      <div class="stat"><div class="v">22</div><div class="l">Voice Tools</div></div>
+      <div class="stat"><div class="v">20</div><div class="l">Action Modules</div></div>
+      <div class="stat"><div class="v">3</div><div class="l">OS Supported</div></div>
+      <div class="stat"><div class="v">~40</div><div class="l">Dependencies</div></div>
+      <div class="stat"><div class="v">5</div><div class="l">Test Suites</div></div>
+      <div class="stat"><div class="v">6</div><div class="l">Memory Categories</div></div>
+    </div>
+  </section>
+
+  <!-- ══════════════ ARCHITECTURE ══════════════ -->
+  <section>
+    <h2><span class="num">02</span> Architecture</h2>
+
+    <h3>Runtime Flow</h3>
+    <div class="card">
+      <p><b>1 · Boot</b> — <code>main.py</code> loads config + long-term memory, builds a Gemini <code>LiveConnectConfig</code> (system prompt, identity injection, current date/time, tool declarations), then opens the streaming session with voice <code>Charon</code>.</p>
+      <p style="margin-top:8px"><b>2 · Listen</b> — <code>sounddevice</code> captures 16 kHz int16 PCM in a callback thread; the HUD VU meter is fed via strided RMS while frames are pushed into an asyncio out-queue.</p>
+      <p style="margin-top:8px"><b>3 · Think</b> — The model may emit <code>FunctionCall</code>s. <code>JarvisLive._execute_tool()</code> dispatches them to the matching <code>actions/*</code> module in a thread executor, and returns <code>FunctionResponse</code>.</p>
+      <p style="margin-top:8px"><b>4 · Speak</b> — 24 kHz audio streams back and is chunked into ~50 ms slices so the <b>interrupt button stops speech within 50 ms</b>; transcripts are logged to the HUD and mirrored to the phone dashboard.</p>
+      <p style="margin-top:8px"><b>5 · Vision</b> — <code>screen_process</code> captures the screen/webcam, compresses to JPEG (&le;1280&times;720), and injects the image into the live session for analysis. A 4 s cooldown prevents echo-triggered duplicate captures.</p>
+      <p style="margin-top:8px"><b>6 · Remember</b> — <code>save_memory</code> silently persists personal facts (identity, preferences, projects, relationships, wishes, notes) to <code>memory/long_term.json</code>, which is injected into every future prompt.</p>
+    </div>
+
+    <h3>Module Map</h3>
+    <div class="tree">
+<span class="dir">Mark-XLIX/</span>
+├── <span class="dir">main.py</span> <span class="cmt"># Core loop — Gemini Live session, audio I/O, tool dispatch (JarvisLive)</span>
+├── <span class="dir">ui.py</span> <span class="cmt"># PyQt6 HUD — waveform, VU meter, log panel, interrupt, camera feed</span>
+├── <span class="dir">setup.py</span> <span class="cmt"># First-run configuration wizard</span>
+├── <span class="dir">utils.py</span> <span class="cmt"># Paths, config loader, Gemini client factory, constants</span>
+├── <span class="dir">core/</span>
+│   ├── prompt.txt      <span class="cmt"># Assistant personality + tool-routing rules</span>
+│   ├── llm_client.py   <span class="cmt"># Local LLM fallback (Ollama / OpenAI-compatible) + KV warmup</span>
+│   ├── installer.py    <span class="cmt"># Auto-installs missing dependencies on first launch</span>
+│   ├── stt.py / tts.py <span class="cmt"># Speech-to-text & text-to-speech engine wrappers</span>
+├── <span class="dir">actions/</span> <span class="cmt"># 20 tool modules (see Capabilities)</span>
+├── <span class="dir">memory/</span>
+│   ├── memory_manager.py <span class="cmt"># Persistent long-term memory (JSON, LRU-trimmed)</span>
+│   └── config_manager.py <span class="cmt"># API keys, names, wake word, briefing settings</span>
+├── <span class="dir">dashboard/</span> <span class="cmt"># FastAPI server — phone remote control via QR pairing</span>
+│   └── static/          <span class="cmt"># app.html (control UI) · login.html</span>
+└── <span class="dir">tests/</span> <span class="cmt"># pytest suites (regressions, UI features, wake word)</span>
+    </div>
+
+    <h3>Key Design Decisions</h3>
+    <div class="grid grid3">
+      <div class="card">
+        <b>50 ms interrupt slicing</b><br>
+        <span class="desc">Received audio is split into 2400-byte chunks so the interrupt handler can discard queued audio and re-open the mic almost instantly.</span>
+      </div>
+      <div class="card">
+        <b>Nuclear subprocess guard</b><br>
+        <span class="desc">On Windows, <code>Popen</code> is globally patched to force <code>CREATE_NO_WINDOW</code> — no console flashes from any tool.</span>
+      </div>
+      <div class="card">
+        <b>Vision cooldown</b><br>
+        <span class="desc">A 4 s monotonic cooldown + busy-flag prevents the model's echo from triggering duplicate screen captures.</span>
+      </div>
+      <div class="card">
+        <b>Two-phase briefing</b><br>
+        <span class="desc">News is pre-fetched in a background thread while the greeting plays — no extra Gemini round-trip at startup.</span>
+      </div>
+      <div class="card">
+        <b>Identity injection</b><br>
+        <span class="desc">Assistant name, user name and current date/time are injected into the system prompt every session — prompt.txt stays static.</span>
+      </div>
+      <div class="card">
+        <b>Local LLM fallback</b><br>
+        <span class="desc"><code>core/llm_client.py</code> supports Ollama / LM Studio backends with KV-cache warmup (&asymp;17 s &rarr; &lt;1 s first-token).</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════════ CAPABILITIES ══════════════ -->
+  <section>
+    <h2><span class="num">03</span> Capabilities — Voice Tools</h2>
+    <div class="card" style="padding:0; overflow-x:auto">
+      <table>
+        <thead><tr><th>Tool</th><th>What it does</th></tr></thead>
+        <tbody>
+          <tr><td>generate_image</td><td class="desc">Creates styled images (PIL procedural generator) — 16 styles, aspect ratios, color schemes, complexity levels; saved to <code>~/Pictures/Jarvis</code> and shown on the dashboard.</td></tr>
+          <tr><td>open_app</td><td class="desc">Launches any application or website by name.</td></tr>
+          <tr><td>web_search</td><td class="desc">Multi-mode search — <code>search</code> · <code>news</code> · <code>research</code> · <code>price</code> · <code>compare</code>. Gemini Grounded first, DDG fallback. Results mirrored to the on-screen content panel.</td></tr>
+          <tr><td>system_status</td><td class="desc">Real-time CPU / RAM / GPU / temperature telemetry with localized voice alerts.</td></tr>
+          <tr><td>weather_report</td><td class="desc">Live weather for your city, personalized from memory.</td></tr>
+          <tr><td>send_message</td><td class="desc">Composes &amp; sends messages via WhatsApp, Telegram, and more.</td></tr>
+          <tr><td>reminder</td><td class="desc">OS-native scheduled notifications (Task Scheduler / LaunchAgent / systemd).</td></tr>
+          <tr><td>youtube_video</td><td class="desc">Play, summarize, get video info, or show trending videos.</td></tr>
+          <tr><td>screen_process</td><td class="desc">Vision — captures screen or webcam, sends the image into the live session for analysis.</td></tr>
+          <tr><td>close_camera</td><td class="desc">Closes the live camera view.</td></tr>
+          <tr><td>computer_settings</td><td class="desc">Volume, brightness, WiFi, power, dark mode, shortcuts, window management.</td></tr>
+          <tr><td>browser_control</td><td class="desc">Opens real browser sessions, or attaches an automation browser for click / type / fill_form / scroll / screenshot.</td></tr>
+          <tr><td>file_controller</td><td class="desc">Full file ops — list, create, delete, move, copy, rename, find, disk usage, organize desktop.</td></tr>
+          <tr><td>desktop_control</td><td class="desc">Wallpaper, organize / clean / list desktop, stats, natural-language desktop tasks.</td></tr>
+          <tr><td>code_helper</td><td class="desc">Write, edit, explain, run or build code files.</td></tr>
+          <tr><td>dev_agent</td><td class="desc">Builds complete multi-file projects: plans, writes files, installs deps, opens VS Code, runs &amp; fixes errors.</td></tr>
+          <tr><td>computer_control</td><td class="desc">Type, click, hotkeys, scroll, mouse move, screenshots, on-screen element find/click.</td></tr>
+          <tr><td>game_updater</td><td class="desc">Steam / Epic — install, update, list games, download status, scheduled updates, shutdown-when-done.</td></tr>
+          <tr><td>flight_finder</td><td class="desc">Live Google Flights price &amp; availability lookup, spoken results.</td></tr>
+          <tr><td>file_processor</td><td class="desc">Processes uploaded files — images, PDFs, Word, CSV/Excel, JSON, code, audio, video, archives, presentations.</td></tr>
+          <tr><td>save_memory</td><td class="desc">Silently stores personal facts into long-term memory (6 categories, English values).</td></tr>
+          <tr><td>shutdown_jarvis</td><td class="desc">Gracefully ends the session (works in any language).</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Non-Tool Features</h3>
+    <div class="grid grid2">
+      <div class="card">
+        <ul class="clean">
+          <li><b>⚡ Auto-Start on Boot</b> — one-click toggle; Windows registry (<code>pythonw.exe</code>, no console), macOS LaunchAgent, Linux <code>.desktop</code>.</li>
+          <li><b>🎨 Assistant Customization</b> — rename the assistant &amp; set your own name; applies to the whole UI + system prompt instantly.</li>
+          <li><b>📋 Clipboard Intelligence</b> — copy &ge;10 chars &rarr; floating panel with TRANSLATE · SUMMARISE · EXPLAIN · FIX.</li>
+          <li><b>☀ Morning Briefing</b> — toggleable; greets, reads time, live news, weather — with background news pre-fetch.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <ul class="clean">
+          <li><b>🔔 Proactive Check-ins</b> — after 15 min of silence, offers something genuinely useful.</li>
+          <li><b>📱 Remote Dashboard</b> — FastAPI + QR pairing; control from your phone, view live logs &amp; generated images.</li>
+          <li><b>🔊 Wake Word (Mark L preview)</b> — Porcupine detection with energy-VAD fallback; pausable while speaking.</li>
+          <li><b>🧑‍💻 Silent Language Memory</b> — detects spoken language on first use; future sessions adapt automatically.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════════ MEMORY ══════════════ -->
+  <section>
+    <h2><span class="num">04</span> Memory System</h2>
+    <div class="card">
+      <p>Persistent facts live in <code>memory/long_term.json</code> and are injected into every system prompt. Memory is <b>auto-trimmed</b> (oldest-first by <code>updated</code> date) to a ~2.2 KB budget, and values are capped at 380 chars.</p>
+    </div>
+    <div class="grid grid3" style="margin-top:14px">
+      <div class="card"><b>identity</b><br><span class="desc">name, age, birthday, city, job, language, nationality…</span></div>
+      <div class="card"><b>preferences</b><br><span class="desc">favorite food / color / music, hobbies…</span></div>
+      <div class="card"><b>projects</b><br><span class="desc">active projects, goals, things being built</span></div>
+      <div class="card"><b>relationships</b><br><span class="desc">friends, family, partner, colleagues</span></div>
+      <div class="card"><b>wishes</b><br><span class="desc">future plans, things to buy, travel dreams</span></div>
+      <div class="card"><b>notes</b><br><span class="desc">habits, schedule, anything else worth remembering</span></div>
+    </div>
+    <p class="muted" style="margin-top:12px;font-size:13px">✏️ <code>remember()</code> / <code>forget()</code> helpers are also exposed for programmatic access. Settings (API key, assistant name, user name, wake word, briefing toggle) are stored separately in <code>config/api_keys.json</code>.</p>
+  </section>
+
+  <!-- ══════════════ DEV STATUS ══════════════ -->
+  <section>
+    <h2><span class="num">05</span> Development Status</h2>
+
+    <h3>Test Coverage</h3>
+    <div class="grid grid2">
+      <div class="card">
+        <b>tests/test_regressions.py</b> <span class="badge b-green">crash regressions</span>
+        <p class="desc" style="margin-top:6px">Guards the F821 undefined-name bugs found by a ruff pass — <code>subprocess</code> in <code>_focus_window</code>, vision constants in <code>screen_processor</code>, undefined <code>_get_model()</code> in <code>dev_agent</code>. Also enforces <b>argument-list (non-shell) subprocess calls</b> on every OS branch and cross-OS focus-window behavior.</p>
+      </div>
+      <div class="card">
+        <b>tests/test_ui_features.py</b> <span class="badge b-amber">UI / headless</span>
+        <p class="desc" style="margin-top:6px">Tests <code>_lerp_hex</code> color morphing, command-history line edit (Up/Down navigation, 50-cap, draft restore), the HUD VU meter (peak-hold + decay), and the help overlay — with a live 16 ms animation-timer test via <code>QTest.qWait</code>.</p>
+      </div>
+      <div class="card">
+        <b>tests/test_wake_word.py</b> <span class="badge b-purple">audio / mocked</span>
+        <p class="desc" style="margin-top:6px">Covers the <code>WakeWordDetector</code>: lifecycle (start/stop/pause/resume), energy-VAD triggering, Porcupine mode (keyword/sensitivity/cleanup), and robustness edge cases — mic fully mocked.</p>
+      </div>
+      <div class="card">
+        <b>test_gallery.py · test_image_generation.py</b> <span class="badge b-green">features</span>
+        <p class="desc" style="margin-top:6px">Standalone suites for the generate-all-styles gallery and image-generation pipeline.</p>
+      </div>
+    </div>
+
+    <h3>Dependency Stack (~40 packages)</h3>
+    <div class="card">
+      <div class="bar-row"><div class="bar-top"><span>UI &amp; Desktop — PyQt6, Pillow, pyautogui, mss, qrcode, psutil</span><span>8</span></div><div class="bar"><i style="width:80%"></i></div></div>
+      <div class="bar-row"><div class="bar-top"><span>Audio &amp; Speech — sounddevice, pydub, miniaudio, edge-tts, kokoro, pycaw</span><span>6</span></div><div class="bar"><i style="width:60%"></i></div></div>
+      <div class="bar-row"><div class="bar-top"><span>STT / Wake Word — faster-whisper, vosk, pvporcupine</span><span>3</span></div><div class="bar"><i style="width:30%"></i></div></div>
+      <div class="bar-row"><div class="bar-top"><span>AI / ML — google-genai, google-generativeai, torch, pynvml</span><span>4</span></div><div class="bar"><i style="width:40%"></i></div></div>
+      <div class="bar-row"><div class="bar-top"><span>Web &amp; Networking — requests, bs4, duckduckgo-search, playwright, fastapi, uvicorn</span><span>6</span></div><div class="bar"><i style="width:60%"></i></div></div>
+      <div class="bar-row"><div class="bar-top"><span>Docs &amp; Media — PyPDF2, pdfplumber, python-docx, pandas, numpy, opencv</span><span>6</span></div><div class="bar"><i style="width:60%"></i></div></div>
+      <div class="bar-row"><div class="bar-top"><span>Windows-specific — pywinauto, pywin32, wmi, comtypes, win10toast</span><span>5</span></div><div class="bar"><i style="width:50%"></i></div></div>
+      <div class="bar-row"><div class="bar-top"><span>Dev / Test — pytest</span><span>1</span></div><div class="bar"><i style="width:10%"></i></div></div>
+    </div>
+
+    <h3>Health &amp; Observations</h3>
+    <div class="card">
+      <ul class="clean">
+        <li><b>Well-tested core</b> — the crash-level regressions (vision pipeline, window focus, dev agent) are locked down with tests; UI animation is exercised headlessly.</li>
+        <li><b>Security hygiene</b> — subprocess calls use argument lists (no <code>shell=True</code>), and Windows console windows are suppressed globally.</li>
+        <li><b>Not a git repository</b> — <code>.gitignore</code> exists but the folder has no <code>.git/</code>; history / version control is not set up.</li>
+        <li><b>Heavy dependency footprint</b> — torch, faster-whisper and playwright/Chromium make first install large (~GB scale); <code>core/installer.py</code> and the README both auto/ manually handle missing packages.</li>
+        <li><b>Optional extras</b> — <code>pvporcupine</code> (accurate offline wake word) and some Windows packages are optional / platform-gated.</li>
+        <li><b>Version pin note</b> — <code>kokoro&gt;=0.9</code> is pinned because 0.9 dropped AlbertModel/AutoModel support.</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ══════════════ ROADMAP ══════════════ -->
+  <section>
+    <h2><span class="num">06</span> Roadmap</h2>
+    <div class="card" style="padding:0; overflow-x:auto">
+      <table>
+        <thead><tr><th>Mark</th><th>Focus</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td>XLVIII</td><td class="desc">Instant interrupt · parallel news · two-phase briefing · exponential backoff · vision cooldown</td><td><span class="badge b-green">Shipped</span></td></tr>
+          <tr><td>XLIX</td><td class="desc">Auto-start on boot · clipboard intelligence · assistant customization · briefing toggle · speed optimization</td><td><span class="badge b-green">Current</span></td></tr>
+          <tr><td>L</td><td class="desc">Wake word · proactive system 2.0 · session memory / daily continuity</td><td><span class="badge b-amber">Next</span></td></tr>
+          <tr><td>LI+</td><td class="desc">Plugin system · email · quiz mode · calorie counter · and more</td><td><span class="badge b-purple">Planned</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ══════════════ QUICK START ══════════════ -->
+  <section>
+    <h2><span class="num">07</span> Quick Start</h2>
+    <div class="tree">
+git clone https://github.com/FatihMakes/Mark-XLIX.git
+cd Mark-XLIX
+pip install -r requirements.txt
+python main.py
+    </div>
+    <p class="muted" style="margin-top:12px;font-size:13px">Requirements: Windows 10/11, macOS or Linux · Python 3.11 / 3.12 · a microphone · a free Gemini API key in <code>config/api_keys.json</code>.</p>
+  </section>
+
+  <footer>
+    <div>MARK XLIX — Project Report · Generated August 4, 2026</div>
+    <div class="footer-note">Engineered by FatihMakes · ⭐ Star the repository to support the journey to Mark 100</div>
+  </footer>
+</div>
+
+</body>
+</html>

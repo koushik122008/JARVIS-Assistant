@@ -1,0 +1,19 @@
+# Core audio
+numpy>=1.24
+pyaudio>=0.2.13
+
+# Wake word (on-device, no cloud)
+openwakeword>=0.6.0
+
+# Speech-to-text (local)
+faster-whisper>=1.0.0
+
+# LLM
+requests>=2.31
+
+# Text-to-speech (local)
+kokoro-onnx>=0.5.0
+soundfile>=0.12
+
+# TTS cloud fallback (no API key required, needs internet)
+edge-tts>=6.1.0

@@ -1,0 +1,46 @@
+# ── Python ───────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# ── Environment ─────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+venv/
+.venv/
+env/
+
+# ── IDE / Editor ────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS ──────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Config — API keys MUST NOT be committed ──────────────
+config/api_keys.json
+
+# ── Secrets — TLS private keys MUST NEVER be committed ─────
+config/certs/
+
+# ── Local app data / databases ────────────────────────────
+.freebuff/
+
+# ── Project-specific ────────────────────────────────────
+memory/long_term.json
+*.log
+JarvisProjects/
+screenshots/
+
+# ── Tool caches ──────────────────────────────────────────
+.pytest_cache/
+.ruff_cache/

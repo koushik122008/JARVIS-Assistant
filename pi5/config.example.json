@@ -1,0 +1,23 @@
+{
+  "assistant_name": "Jarvis",
+  "user_name": "sir",
+  "wake_word_sensitivity": 0.5,
+  "silence_threshold": 500,
+  "mic_index": null,
+  "speaker_index": null,
+
+  "llm": {
+    "url": "http://localhost:11434",
+    "model": "qwen2.5:3b"
+  },
+
+  "stt": {
+    "model": "small.int8"
+  },
+
+  "tts": {
+    "engine": "kokoro",
+    "voice": "af_sarah",
+    "speed": 1.0
+  }
+}

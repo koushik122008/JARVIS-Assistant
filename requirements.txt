@@ -1,0 +1,69 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# MARK XLIX — Dependencies
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── UI & Desktop ──────────────────────────────────────────────────────────────
+PyQt6
+Pillow
+pyautogui
+pygetwindow
+pyperclip
+mss
+qrcode[pil]
+send2trash
+psutil
+
+# ── Audio / Speech ────────────────────────────────────────────────────────────
+sounddevice
+pydub
+miniaudio
+edge-tts
+kokoro
+pycaw; sys_platform == "win32"
+
+# ── Speech Recognition ────────────────────────────────────────────────────────
+faster-whisper
+vosk
+
+# ── Wake Word Detection (optional) ───────────────────────────────────────────
+# pip install pvporcupine   for accurate offline wake word detection
+# Without it, falls back to energy-based VAD (less accurate)
+pvporcupine
+
+# ── AI / ML ───────────────────────────────────────────────────────────────────
+google-generativeai
+google-genai
+torch
+pynvml
+
+# ── Web & Networking ──────────────────────────────────────────────────────────
+requests
+beautifulsoup4
+duckduckgo-search
+playwright
+cryptography
+python-multipart
+fastapi
+uvicorn[standard]
+
+# ── PDF / Document Processing ────────────────────────────────────────────────
+PyPDF2
+pdfplumber
+python-docx
+python-pptx
+pandas
+numpy
+opencv-python
+
+# ── YouTube ───────────────────────────────────────────────────────────────────
+youtube-transcript-api
+
+# ── Windows-Specific ──────────────────────────────────────────────────────────
+comtypes; sys_platform == "win32"
+win10toast; sys_platform == "win32"
+pywinauto; sys_platform == "win32"
+pywin32; sys_platform == "win32"
+wmi; sys_platform == "win32"
+
+# ── Development / Testing ─────────────────────────────────────────────────────
+pytest
