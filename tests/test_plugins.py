@@ -37,7 +37,7 @@ class TestDiscovery(unittest.TestCase):
             "flight_finder", "shutdown_jarvis", "file_processor",
             "currency_converter", "crypto_prices", "unit_converter", "alarm",
             "battery_info", "translate_text", "stock_prices", "set_timer",
-            "save_memory",
+            "save_memory", "agent_task",
         }
         plugin_names = {t["name"] for t in PLUGIN_TOOLS}
         self.assertFalse(plugin_names & builtins)

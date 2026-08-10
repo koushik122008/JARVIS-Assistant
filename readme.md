@@ -124,6 +124,7 @@ Mark XLIX/
 │   ├── game_updater.py      # Game update management (Steam / Epic)
 │   ├── code_helper.py       # Code review and generation
 │   ├── dev_agent.py         # Developer task agent
+│   ├── agent_task.py        # Multi-agent system: planner + sub-agents (research, web, code, file, system)
 │   ├── desktop.py           # Desktop and taskbar control
 │   └── proactive.py         # Proactive silence-break suggestions
 ├── memory/                  # Persistent key-value memory store

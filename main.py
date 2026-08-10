@@ -19,6 +19,7 @@ import array
 import asyncio
 import math
 import re
+import sys
 import threading
 import time
 import json
@@ -35,6 +36,7 @@ from memory.memory_manager import (
 )
 from memory.config_manager import (
     get_brief_enabled, get_wake_word_keyword, get_wake_word_sensitivity,
+    get_proactive_enabled,
 )
 
 from actions.file_processor import file_processor
@@ -60,6 +62,7 @@ from actions.browser_control   import browser_control
 from actions.file_controller   import file_controller
 from actions.code_helper       import code_helper
 from actions.dev_agent         import dev_agent
+from actions.agent_task        import agent_task as agent_task_action
 from actions.web_search        import web_search as web_search_action
 from actions.computer_control  import computer_control
 from actions.game_updater      import game_updater
@@ -410,6 +413,40 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "agent_task",
+        "description": (
+            "Delegates a COMPLEX multi-step goal to the agent system. "
+            "Use ONLY when a task needs multiple steps or several different tools "
+            "(e.g. 'research the best budget laptops and write a summary report', "
+            "'build a script that fetches stock prices, runs it, and saves a report'). "
+            "Sub-agents: research (deep web research), web (browser pages), code "
+            "(write/run/fix code), file (local files), system (hardware status). "
+            "For anything a single tool can do, use that tool directly — never this."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "goal": {
+                    "type": "STRING",
+                    "description": "The complete task to accomplish, described in detail"
+                },
+                "agent": {
+                    "type": "STRING",
+                    "description": "Optional: force one agent — auto (default) | research | web | code | file | system"
+                },
+                "context": {
+                    "type": "STRING",
+                    "description": "Optional extra context: constraints, preferences, file paths"
+                },
+                "max_steps": {
+                    "type": "INTEGER",
+                    "description": "Max planner steps (default: 6, max: 10)"
+                },
+            },
+            "required": ["goal"]
+        }
+    },
+    {
         "name": "computer_control",
         "description": "Direct computer control: type, click, hotkeys, scroll, move mouse, screenshots, find elements on screen.",
         "parameters": {
@@ -739,6 +776,7 @@ class JarvisLive:
         self._briefing_sent    = False          # morning briefing fires once per process
         self._sys_monitor      = SystemMonitor()  # persistent cooldown state
         self._proactive        = ProactiveEngine()
+        self._proactive_enabled = get_proactive_enabled()  # UI-toggleable
         self._last_user_speech = time.monotonic()  # updated on every user utterance
 
         # ── Wake word detection ────────────────────────────────────────────
@@ -747,6 +785,7 @@ class JarvisLive:
         self._pending_wake_greeting = False  # send greeting after next reconnect
         self.ui.on_wake_word_toggled = self._on_wake_word_toggle
         self.ui.on_wake_word_settings = self._on_wake_word_settings_changed
+        self.ui.on_proactive_toggled  = self._on_proactive_toggle
 
     def _make_remote_key(self):
         """Called from Qt main thread when user presses Remote Control."""
@@ -1000,6 +1039,17 @@ class JarvisLive:
             elif name == "dev_agent":
                 r = await loop.run_in_executor(None, lambda: dev_agent(parameters=args, player=self.ui, speak=self.speak))
                 result = r or "Done."
+
+            elif name == "agent_task":
+                r = await loop.run_in_executor(
+                    None,
+                    lambda: agent_task_action(parameters=args, player=self.ui, speak=self.speak)
+                )
+                result = r or "Done."
+                # Mirror the full agent report to the on-screen content panel
+                if r and not r.startswith("Please tell me") and not r.startswith("I don't have"):
+                    _goal = args.get("goal") or ""
+                    self.ui.show_content(f"AGENTS — {_goal[:38]}", r)
 
             elif name == "web_search":
                 r = await loop.run_in_executor(None, lambda: web_search_action(parameters=args, player=self.ui))
@@ -1426,6 +1476,9 @@ class JarvisLive:
         while True:
             await asyncio.sleep(60)   # evaluate once per minute
 
+            if not self._proactive_enabled:
+                continue
+
             if not self.session:
                 continue
 
@@ -1543,6 +1596,13 @@ class JarvisLive:
         else:
             self._stop_wake_word()
             self.ui.write_log("SYS: Wake word detection disabled.")
+
+    def _on_proactive_toggle(self, enabled: bool):
+        """Called from UI thread when user toggles proactive check-ins."""
+        self._proactive_enabled = bool(enabled)
+        state = "enabled" if self._proactive_enabled else "disabled"
+        self.ui.write_log(f"SYS: Proactive check-ins {state}.")
+        print(f"[Proactive] {state} by user.")
 
     def _on_wake_word_settings_changed(self):
         """Called from UI thread when user changes keyword/sensitivity in settings.
@@ -1773,6 +1833,14 @@ def main():
     def runner():
         ui.wait_for_api_key()
         jarvis = JarvisLive(ui)
+        # Cold-start wake: launched by the background listener after "Hey Jarvis" —
+        # enable the in-app wake word so the user can speak their command right away.
+        if "--woke" in sys.argv:
+            try:
+                jarvis._on_wake_word_toggle(True)
+                ui.write_log("SYS: Woken from background — say your command.")
+            except Exception as e:
+                print(f"[JARVIS] --woke wake word enable failed: {e}")
         try:
             asyncio.run(jarvis.run())
         except KeyboardInterrupt:

@@ -10,10 +10,14 @@ Fallback: simple energy-based voice activity detection (less accurate, no
           wake word discrimination — just detects loud sounds).
 """
 
+import json
 import logging
+import os
 import struct
+import sys
 import threading
 import time
+from pathlib import Path
 from typing import Callable, Optional
 
 import sounddevice as sd
@@ -26,6 +30,62 @@ SAMPLE_RATE = 16000
 FRAME_LENGTH = 512          # Porcupine expects 512 samples per frame
 SILENCE_TIMEOUT = 8.0       # seconds of user silence before re-engaging wake word
 ENERGY_THRESHOLD = 500      # RMS threshold for fallback VAD mode
+
+# ── Vosk model management ─────────────────────────────────────────────────────
+
+VOSK_MODEL_NAME = "vosk-model-small-en-us-0.15"
+VOSK_MODEL_URL = f"https://alphacephei.com/vosk/models/{VOSK_MODEL_NAME}.zip"
+
+
+def _model_cache_dir() -> Path:
+    """User-level cache for the offline Vosk model (kept out of the repo)."""
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData/Local")
+        return Path(local) / "JARVIS"
+    return Path.home() / ".local" / "share" / "jarvis"
+
+
+def _vosk_model_dir() -> Path:
+    return _model_cache_dir() / VOSK_MODEL_NAME
+
+
+def _ensure_vosk_model() -> Optional[Path]:
+    """Return the Vosk model directory, downloading it on first use (~40 MB)."""
+    target = _vosk_model_dir()
+    if target.is_dir() and any(target.iterdir()):
+        return target
+    import urllib.request
+    import zipfile
+
+    cache = _model_cache_dir()
+    try:
+        cache.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return None
+    zpath = cache / f"{VOSK_MODEL_NAME}.zip"
+    try:
+        logger.info(f"[WakeWord] Downloading Vosk model ({VOSK_MODEL_NAME}) — ~40 MB, one time…")
+        urllib.request.urlretrieve(VOSK_MODEL_URL, zpath)
+        with zipfile.ZipFile(zpath) as zf:
+            zf.extractall(cache)
+        zpath.unlink(missing_ok=True)
+        return target if target.is_dir() else None
+    except Exception as e:
+        logger.error(f"[WakeWord] Vosk model download failed: {e}")
+        try:
+            zpath.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return None
+
+
+def _text_contains_keyword(text: str, keyword: str) -> bool:
+    """True if recogniser text contains the wake keyword (case/space-insensitive)."""
+    if not keyword:
+        return False
+    norm = " ".join(text.lower().split())
+    kw = " ".join(keyword.lower().split())
+    return bool(kw and kw in norm)
 
 # Built-in Porcupine keywords available in the free tier
 # Full list: "alexa", "americano", "blueberry", "bumblebee", "computer",
@@ -63,6 +123,9 @@ class WakeWordDetector:
         self._running = False
         self._porcupine = None
         self._porcupine_ok = False
+        self._vosk = None
+        self._vosk_ok = False
+        self._vosk_recognizer = None
         self._audio_stream: Optional[sd.InputStream] = None
         self._lock = threading.Lock()
 
@@ -74,13 +137,19 @@ class WakeWordDetector:
             return
         self._running = True
         self._try_init_porcupine()
+        self._try_init_vosk()
         self._thread = threading.Thread(
             target=self._run,
             daemon=True,
             name="WakeWordThread",
         )
         self._thread.start()
-        mode = "Porcupine" if self._porcupine_ok else "Energy VAD (fallback)"
+        if self._porcupine_ok:
+            mode = "Porcupine"
+        elif self._vosk_ok:
+            mode = "Vosk"
+        else:
+            mode = "Energy VAD (fallback)"
         logger.info(f"[WakeWord] Started — mode: {mode}, keyword: '{self.keyword}'")
 
     def stop(self):
@@ -146,6 +215,65 @@ class WakeWordDetector:
             logger.warning(f"[WakeWord] Porcupine init failed ({e}) — using VAD fallback.")
             self._porcupine_ok = False
 
+    # ── Vosk initialisation ────────────────────────────────────────────────────
+
+    def _try_init_vosk(self):
+        """Attempt to initialise Vosk (offline, no API key). Sets _vosk_ok on success."""
+        try:
+            import vosk
+            model_path = _ensure_vosk_model()
+            if model_path is None:
+                logger.warning("[WakeWord] Vosk model unavailable — skipping Vosk mode.")
+                self._vosk_ok = False
+                return
+            self._vosk = vosk.Model(str(model_path))
+            self._vosk_recognizer = vosk.KaldiRecognizer(self._vosk, SAMPLE_RATE)
+            self._vosk_ok = True
+            logger.info(f"[WakeWord] Vosk loaded — model: {model_path.name}")
+        except ImportError:
+            logger.warning("[WakeWord] vosk not installed — pip install vosk")
+            self._vosk_ok = False
+        except Exception as e:
+            logger.warning(f"[WakeWord] Vosk init failed ({e}).")
+            self._vosk_ok = False
+
+    def _run_vosk(self):
+        """Vosk-based detection loop — accurate offline keyword spotting."""
+        recognizer = self._vosk_recognizer
+        frame_bytes = bytearray()
+
+        def callback(indata, frames, time_info, status):
+            nonlocal frame_bytes
+            if not self._running:
+                return
+            frame_bytes.extend(bytes(indata))
+
+        with sd.RawInputStream(
+            samplerate=SAMPLE_RATE,
+            channels=1,
+            dtype="int16",
+            blocksize=SAMPLE_RATE // 2,
+            callback=callback,
+        ):
+            while self._running:
+                if frame_bytes:
+                    chunk = bytes(frame_bytes)
+                    frame_bytes.clear()
+                    try:
+                        recognizer.AcceptWaveform(chunk)
+                        partial = recognizer.PartialResult()
+                        text = json.loads(partial).get("partial", "")
+                        if _text_contains_keyword(text, self.keyword):
+                            logger.info(f"[WakeWord] 🔔 Vosk detected: '{self.keyword}'")
+                            recognizer.Reset()
+                            if self.on_detected:
+                                self.on_detected()
+                            time.sleep(2.0)
+                    except Exception as e:
+                        logger.error(f"[WakeWord] Vosk error: {e}")
+                else:
+                    time.sleep(0.05)
+
     # ── Main loop ──────────────────────────────────────────────────────────────
 
     def _run(self):
@@ -153,6 +281,8 @@ class WakeWordDetector:
         try:
             if self._porcupine_ok:
                 self._run_porcupine()
+            elif self._vosk_ok:
+                self._run_vosk()
             else:
                 self._run_vad()
         except Exception as e:
@@ -174,7 +304,8 @@ class WakeWordDetector:
             nonlocal frame_bytes, pcm_frame
             if not self._running:
                 return
-            frame_bytes.extend(indata.tobytes())
+            # RawInputStream yields CFFI buffers — bytes() is the portable cast.
+            frame_bytes.extend(bytes(indata))
             # Process 512-sample frames
             while len(frame_bytes) >= FRAME_LENGTH * 2:
                 chunk = frame_bytes[:FRAME_LENGTH * 2]

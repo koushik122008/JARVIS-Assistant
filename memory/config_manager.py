@@ -67,3 +67,43 @@ def get_brief_enabled() -> bool:
 
 def save_brief_enabled(enabled: bool) -> None:
     save_config({"morning_brief_enabled": enabled})
+
+
+def get_gemini_voice() -> str:
+    """Return the configured Gemini voice, or 'Charon' if not set."""
+    return load_config().get("gemini_voice", "Charon") or "Charon"
+
+
+def save_gemini_voice(voice: str) -> None:
+    """Persist the Gemini voice; takes effect on the next session."""
+    save_config({"gemini_voice": (voice or "Charon").strip() or "Charon"})
+
+
+def get_boot_sound_enabled() -> bool:
+    """Return whether the startup chime is enabled (default True)."""
+    return bool(load_config().get("boot_sound_enabled", True))
+
+
+def save_boot_sound_enabled(enabled: bool) -> None:
+    """Persist the startup chime toggle; takes effect on the next boot."""
+    save_config({"boot_sound_enabled": bool(enabled)})
+
+
+def get_proactive_enabled() -> bool:
+    """Return whether proactive check-ins are enabled (default True)."""
+    return bool(load_config().get("proactive_enabled", True))
+
+
+def save_proactive_enabled(enabled: bool) -> None:
+    """Persist the proactive check-in toggle."""
+    save_config({"proactive_enabled": bool(enabled)})
+
+
+def get_background_wake_enabled() -> bool:
+    """Return whether cold-start 'Hey Jarvis' wake is enabled (default False)."""
+    return bool(load_config().get("background_wake_enabled", False))
+
+
+def save_background_wake_enabled(enabled: bool) -> None:
+    """Persist the cold-start wake toggle."""
+    save_config({"background_wake_enabled": bool(enabled)})

@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "author": "JARVIS-S3",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "esp32-s3-devkitc-1", "id": "esp", "top": 0, "left": 0, "attrs": {} },
+    { "type": "board-ssd1306", "id": "oled", "top": 0, "left": 280, "attrs": {} },
+    { "type": "ws2812b", "id": "neo", "top": 220, "left": 280, "attrs": {} },
+    { "type": "pushbutton", "id": "btn", "top": 320, "left": 280, "attrs": {} },
+    { "type": "led", "id": "lamp", "top": 430, "left": 280, "attrs": { "color": "yellow" } }
+  ],
+  "connections": [
+    ["esp:GND",  "oled:GND", "black", []],
+    ["esp:3V3",  "oled:VCC", "red",   []],
+    ["esp:GPIO8", "oled:SDA", "green", []],
+    ["esp:GPIO9", "oled:SCL", "blue",  []],
+
+    ["esp:GND",  "neo:GND", "black", []],
+    ["esp:5V",   "neo:5V",  "red",   []],
+    ["esp:GPIO4", "neo:DIN", "green", []],
+
+    ["esp:GPIO5", "btn:1", "blue", []],
+    ["esp:GND",   "btn:3", "black", []],
+
+    ["esp:GPIO6", "lamp:A", "green", []],
+    ["esp:GND",   "lamp:C", "black", []]
+  ],
+  "dependencies": {}
+}

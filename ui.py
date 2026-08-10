@@ -68,7 +68,7 @@ from PyQt6.QtGui import (
     QPen, QPixmap, QRadialGradient, QShortcut,
 )
 from PyQt6.QtWidgets import (
-    QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QMenu, QPushButton, QSizePolicy, QSlider,
     QSplitter, QStackedWidget, QSystemTrayIcon, QTextEdit, QVBoxLayout,
     QWidget,
@@ -82,6 +82,8 @@ _DEFAULT_W, _DEFAULT_H = 980, 700
 _MIN_W,     _MIN_H     = 820, 580
 _LEFT_W  = 148
 _RIGHT_W = 340
+
+_GEMINI_VOICES = ("Puck", "Charon", "Kore", "Fenrir", "Aoede")
 
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
 
@@ -2701,6 +2703,7 @@ class MainWindow(QMainWindow):
         self.on_interrupt          = None   # callable: () -> None — stop JARVIS mid-speech
         self.on_wake_word_toggled  = None   # callable: (bool) -> None — toggle wake word detection
         self.on_wake_word_settings = None   # callable: () -> None — open wake word settings
+        self.on_proactive_toggled  = None   # callable: (bool) -> None — toggle proactive check-ins
         self._wake_word_enabled    = False
         self._muted                = False
         self._always_on_top        = False
@@ -2795,8 +2798,18 @@ class MainWindow(QMainWindow):
         # Quick-access drawer (floating overlay, built after central widget layout is done)
         self._quick_drawer = self._build_quick_drawer()
         self._update_autostart_btn(self._check_autostart())
+        from memory.config_manager import get_boot_sound_enabled as _gbse
         from memory.config_manager import get_brief_enabled as _gbe
+        from memory.config_manager import get_gemini_voice as _gv
+        from memory.config_manager import get_proactive_enabled as _gpe
         self._update_brief_btn(_gbe())
+        self._update_boot_sound_btn(_gbse())
+        self._update_proactive_btn(_gpe())
+        self._update_background_wake_btn(self._check_background_wake())
+        _voice = _gv()
+        self._voice_combo.blockSignals(True)
+        self._voice_combo.setCurrentText(_voice if _voice in _GEMINI_VOICES else "Charon")
+        self._voice_combo.blockSignals(False)
 
         self._clock_tmr = QTimer(self)
         self._clock_tmr.timeout.connect(self._tick_clock)
@@ -3981,6 +3994,81 @@ class MainWindow(QMainWindow):
         help_btn.clicked.connect(self._open_help)
         lay.addWidget(help_btn)
 
+        # ── Agents (launch the multi-agent system) ───────────────────────────
+        ag_hdr = QLabel("◈ AGENTS")
+        ag_hdr.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        ag_hdr.setStyleSheet(f"color: {C.PRI_DIM}; background: transparent; "
+                             f"border-bottom: 1px solid {C.BORDER}; padding-bottom: 4px;")
+        lay.addWidget(ag_hdr)
+
+        for _label, _agent in (
+            ("🧠  RESEARCH", "research"),
+            ("🌐  WEB",      "web"),
+            ("💻  CODE",     "code"),
+            ("📁  FILE",     "file"),
+            ("🔧  SYSTEM",   "system"),
+        ):
+            _b = QPushButton(_label)
+            _b.setFixedHeight(26)
+            _b.setFont(QFont("Courier New", 7))
+            _b.setCursor(Qt.CursorShape.PointingHandCursor)
+            _b.setStyleSheet(_BTN_STYLE_DIM)
+            _b.clicked.connect(lambda _=False, a=_agent: self._agent_launch(a))
+            lay.addWidget(_b)
+
+        # ── Voice picker ─────────────────────────────────────────────────────
+        vo_hdr = QLabel("◈ VOICE")
+        vo_hdr.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        vo_hdr.setStyleSheet(f"color: {C.PRI_DIM}; background: transparent; "
+                             f"border-bottom: 1px solid {C.BORDER}; padding-bottom: 4px;")
+        lay.addWidget(vo_hdr)
+
+        self._voice_combo = QComboBox()
+        self._voice_combo.addItems(list(_GEMINI_VOICES))
+        self._voice_combo.setFixedHeight(24)
+        self._voice_combo.setFont(QFont("Courier New", 7))
+        self._voice_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._voice_combo.setStyleSheet(f"""
+            QComboBox {{
+                background: {C.PANEL2}; color: {C.TEXT};
+                border: 1px solid {C.BORDER}; border-radius: 3px; padding: 2px 4px;
+            }}
+            QComboBox:hover {{ border-color: {C.PRI_DIM}; }}
+            QComboBox QAbstractItemView {{
+                background: {C.DARK}; color: {C.TEXT};
+                border: 1px solid {C.BORDER};
+                selection-background-color: {C.PRI_GHO}; selection-color: {C.PRI};
+            }}
+        """)
+        self._voice_combo.currentTextChanged.connect(self._on_voice_changed)
+        lay.addWidget(self._voice_combo)
+
+        # ── Boot sound toggle ────────────────────────────────────────────────
+        self._boot_sound_btn = QPushButton()
+        self._boot_sound_btn.setFixedHeight(26)
+        self._boot_sound_btn.setFont(QFont("Courier New", 7))
+        self._boot_sound_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._boot_sound_btn.clicked.connect(self._toggle_boot_sound)
+        lay.addWidget(self._boot_sound_btn)
+
+        # ── Proactive check-in toggle ────────────────────────────────────────
+        self._proactive_btn = QPushButton()
+        self._proactive_btn.setFixedHeight(26)
+        self._proactive_btn.setFont(QFont("Courier New", 7))
+        self._proactive_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._proactive_btn.clicked.connect(self._toggle_proactive)
+        lay.addWidget(self._proactive_btn)
+
+        # ── Cold-start wake toggle ────────────────────────────────────────────
+        self._background_wake_btn = QPushButton()
+        self._background_wake_btn.setFixedHeight(26)
+        self._background_wake_btn.setFont(QFont("Courier New", 7))
+        self._background_wake_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._background_wake_btn.setToolTip(
+            "Listen for the wake word at login, even when JARVIS is closed.")
+        self._background_wake_btn.clicked.connect(self._toggle_background_wake)
+        lay.addWidget(self._background_wake_btn)
+
         w.adjustSize()
         return w
 
@@ -4034,6 +4122,14 @@ class MainWindow(QMainWindow):
         _chip("REMIND",  "set a reminder ")
         _chip("WEATHER", "what's the weather today?")
         _chip("HELP",    None)
+        lay.addStretch()
+
+        # Second row — more quick actions
+        _chip("BUILD",   "build a ")
+        _chip("STOCKS",  "what's the price of ")
+        _chip("CRYPTO",  "check the price of ")
+        _chip("TIMER",   "set a timer for ")
+        _chip("NEWS",    "search the news for ")
         lay.addStretch()
         return w
 
@@ -4364,6 +4460,138 @@ class MainWindow(QMainWindow):
         else:
             self._brief_btn.setText("☀  MORNING BRIEF: OFF")
             self._brief_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent; color: {C.TEXT_DIM};
+                    border: 1px solid {C.BORDER}; border-radius: 3px;
+                    text-align: left; padding: 0 8px;
+                }}
+                QPushButton:hover {{ color: {C.TEXT}; border: 1px solid {C.BORDER_B}; }}
+            """)
+
+    def _agent_launch(self, agent: str) -> None:
+        """Prefill the command input with a request for a specialised agent."""
+        self._prefill_input(f"use the {agent} agent to ")
+        self._log.append_log(f"SYS: {agent.upper()} agent ready — type your goal.")
+
+    def _on_voice_changed(self, voice: str) -> None:
+        """Persist the Gemini voice; takes effect on the next session."""
+        if not voice:
+            return
+        from memory.config_manager import save_gemini_voice
+        save_gemini_voice(voice)
+        self._log.append_log(f"SYS: Voice set to {voice} — applies next session.")
+
+    def _toggle_boot_sound(self):
+        from memory.config_manager import (
+            get_boot_sound_enabled,
+            save_boot_sound_enabled,
+        )
+        new_val = not get_boot_sound_enabled()
+        save_boot_sound_enabled(new_val)
+        self._update_boot_sound_btn(new_val)
+        self._log.append_log(
+            f"SYS: Boot sound {'enabled' if new_val else 'disabled'} — applies next launch.")
+
+    def _update_boot_sound_btn(self, enabled: bool):
+        if not hasattr(self, '_boot_sound_btn'):
+            return
+        if enabled:
+            self._boot_sound_btn.setText("🔊  BOOT SOUND: ON")
+            self._boot_sound_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: #001a08; color: {C.GREEN};
+                    border: 1px solid {C.GREEN_D}; border-radius: 3px;
+                    text-align: left; padding: 0 8px;
+                }}
+                QPushButton:hover {{ background: #002010; }}
+            """)
+        else:
+            self._boot_sound_btn.setText("🔊  BOOT SOUND: OFF")
+            self._boot_sound_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent; color: {C.TEXT_DIM};
+                    border: 1px solid {C.BORDER}; border-radius: 3px;
+                    text-align: left; padding: 0 8px;
+                }}
+                QPushButton:hover {{ color: {C.TEXT}; border: 1px solid {C.BORDER_B}; }}
+            """)
+
+    def _toggle_proactive(self):
+        from memory.config_manager import get_proactive_enabled, save_proactive_enabled
+        new_val = not get_proactive_enabled()
+        save_proactive_enabled(new_val)
+        self._update_proactive_btn(new_val)
+        self._log.append_log(
+            f"SYS: Proactive check-ins {'enabled' if new_val else 'disabled'}.")
+        if self.on_proactive_toggled:
+            try:
+                self.on_proactive_toggled(new_val)
+            except Exception as e:
+                self._log.append_log(f"ERR: Proactive toggle callback failed — {e}")
+
+    def _update_proactive_btn(self, enabled: bool):
+        if not hasattr(self, '_proactive_btn'):
+            return
+        if enabled:
+            self._proactive_btn.setText("💬  PROACTIVE: ON")
+            self._proactive_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: #001a08; color: {C.GREEN};
+                    border: 1px solid {C.GREEN_D}; border-radius: 3px;
+                    text-align: left; padding: 0 8px;
+                }}
+                QPushButton:hover {{ background: #002010; }}
+            """)
+        else:
+            self._proactive_btn.setText("💬  PROACTIVE: OFF")
+            self._proactive_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent; color: {C.TEXT_DIM};
+                    border: 1px solid {C.BORDER}; border-radius: 3px;
+                    text-align: left; padding: 0 8px;
+                }}
+                QPushButton:hover {{ color: {C.TEXT}; border: 1px solid {C.BORDER_B}; }}
+            """)
+
+    # ── Cold-start wake ("Hey Jarvis" while the app is closed) ────────────────
+
+    def _check_background_wake(self) -> bool:
+        """True if the cold-start wake listener is registered to run at login."""
+        try:
+            from actions.background_wake import is_registered
+            return is_registered()
+        except Exception:
+            return False
+
+    def _toggle_background_wake(self):
+        from actions.background_wake import register_startup, unregister_startup
+        from memory.config_manager import save_background_wake_enabled
+        enabled = not self._check_background_wake()
+        ok = register_startup() if enabled else unregister_startup()
+        if ok:
+            save_background_wake_enabled(enabled)
+            self._update_background_wake_btn(enabled)
+            self._log.append_log(
+                f"SYS: Wake-from-closed {'enabled — say the wake word anytime' if enabled else 'disabled'}.")
+        else:
+            self._log.append_log("ERR: Failed to update the wake-from-closed startup entry.")
+
+    def _update_background_wake_btn(self, enabled: bool):
+        if not hasattr(self, '_background_wake_btn'):
+            return
+        if enabled:
+            self._background_wake_btn.setText("🎙  WAKE FROM CLOSED: ON")
+            self._background_wake_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: #001a08; color: {C.GREEN};
+                    border: 1px solid {C.GREEN_D}; border-radius: 3px;
+                    text-align: left; padding: 0 8px;
+                }}
+                QPushButton:hover {{ background: #002010; }}
+            """)
+        else:
+            self._background_wake_btn.setText("🎙  WAKE FROM CLOSED: OFF")
+            self._background_wake_btn.setStyleSheet(f"""
                 QPushButton {{
                     background: transparent; color: {C.TEXT_DIM};
                     border: 1px solid {C.BORDER}; border-radius: 3px;

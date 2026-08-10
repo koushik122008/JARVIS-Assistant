@@ -1,9 +1,9 @@
 {
   "enabled": true,
   "time": "21:00",
-  "last_fired": "2026-08-07",
+  "last_fired": "2026-08-09",
   "city": "",
-  "os_scheduled_for": "2026-08-08",
+  "os_scheduled_for": "2026-08-10",
   "os_retry_after": 0.0,
   "push_enabled": false,
   "push_topic": "",

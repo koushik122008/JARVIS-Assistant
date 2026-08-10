@@ -10,19 +10,21 @@ Strategy:
 
 from __future__ import annotations
 
+import json
 import logging
 import struct
 import threading
 import time
-from unittest.mock import MagicMock, patch
+from pathlib import Path
+from unittest.mock import MagicMock, ANY, patch
 
 import pytest
 
 from actions.wake_word import (
+    BUILTIN_KEYWORDS,
     ENERGY_THRESHOLD,
     FRAME_LENGTH,
     SAMPLE_RATE,
-    BUILTIN_KEYWORDS,
     WakeWordDetector,
 )
 
@@ -50,6 +52,16 @@ def _get_captured(key: str, timeout: float = 2.0):
             return cb
         threading.Event().wait(0.01)
     return globals().get(cb_key)
+
+
+def _wait_until(predicate, timeout: float = 2.0) -> bool:
+    """Poll a predicate until it returns True or the timeout elapses."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        threading.Event().wait(0.01)
+    return bool(predicate())
 
 
 @pytest.fixture(autouse=True)
@@ -81,6 +93,90 @@ def mock_raw_stream():
 
         mock_cls.side_effect = capture_callback
         yield mock_cls, mock_instance
+
+
+@pytest.fixture
+def mock_vosk_stream():
+    """
+    Patch sd.RawInputStream for the Vosk detection loop (_run_vosk).
+
+    Captures the stream callback into a module-level global so tests can feed
+    simulated microphone PCM straight into the loop, exactly as sounddevice's
+    own audio thread would deliver it.
+    """
+    with patch("actions.wake_word.sd.RawInputStream") as mock_cls:
+        mock_instance = MagicMock()
+        mock_instance.__enter__.return_value = mock_instance
+        mock_instance.__exit__.return_value = None
+        mock_cls.return_value = mock_instance
+
+        def capture_callback(*args, **kwargs):
+            if "callback" in kwargs:
+                globals()["_captured_vosk"] = kwargs["callback"]
+            return mock_instance
+
+        mock_cls.side_effect = capture_callback
+        yield mock_cls, mock_instance
+
+
+def _make_vosk_detector(keyword: str = "jarvis", partial_text: str = ""):
+    """A WakeWordDetector wired for Vosk mode with a fake recognizer."""
+    fake_recognizer = MagicMock()
+    fake_recognizer.PartialResult.return_value = json.dumps({"partial": partial_text})
+    d = WakeWordDetector(keyword=keyword)
+    d._vosk_ok = True
+    d._vosk_recognizer = fake_recognizer
+    return d, fake_recognizer
+
+
+class _VoskLoopHarness:
+    """
+    Runs _run_vosk in a background thread and exposes the captured mic callback.
+
+    Self-contained: it neutralises the production sleeps (0.05s spin and the
+    2s post-detection debounce) so the loop runs at test speed and the thread
+    can always be joined promptly, and it guarantees the thread is stopped
+    even if setup fails mid-way.
+    """
+
+    def __init__(self, detector):
+        self.detector = detector
+        self.thread: threading.Thread | None = None
+        self.callback = None
+        self._sleep_patch = None
+
+    def __enter__(self):
+        self._sleep_patch = patch("actions.wake_word.time.sleep")
+        self._sleep_patch.start()
+        self.detector._running = True
+        self.thread = threading.Thread(target=self.detector._run_vosk, daemon=True)
+        self.thread.start()
+        try:
+            self.callback = _get_captured("vosk")
+            assert self.callback is not None, "Vosk stream callback was not captured"
+        except BaseException:
+            # __exit__ is not called when __enter__ raises — clean up here so a
+            # setup failure can never leak a spinning thread or an active patch.
+            self.detector._running = False
+            if self.thread is not None:
+                self.thread.join(timeout=3.0)
+            if self._sleep_patch is not None:
+                self._sleep_patch.stop()
+            raise
+        return self
+
+    def feed(self, data: bytes):
+        """Push one PCM chunk into the loop, as the audio thread would."""
+        self.callback(data, SAMPLE_RATE // 2, None, None)
+
+    def __exit__(self, *exc):
+        self.detector._running = False
+        if self.thread is not None:
+            self.thread.join(timeout=3.0)
+            assert not self.thread.is_alive(), "Vosk loop thread did not stop"
+        if self._sleep_patch is not None:
+            self._sleep_patch.stop()
+        return False
 
 
 @pytest.fixture
@@ -138,6 +234,13 @@ class TestConstructor:
 
 
 class TestLifecycleVAD:
+    @pytest.fixture(autouse=True)
+    def _force_vad_mode(self):
+        """Block the real vosk module so detection falls back to energy-VAD mode
+        (vosk is installed on this machine, which would otherwise take priority)."""
+        with patch.dict("sys.modules", {"vosk": None}):
+            yield
+
     def test_start_and_stop(self, mock_raw_stream, detector):
         d = detector
         assert d.is_running is False
@@ -232,6 +335,128 @@ class TestLifecycleVAD:
         threading.Event().wait(0.1)
         assert not wake_event.is_set(), "Wake should NOT fire when detector is paused"
         d.stop()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Vosk mode tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestVoskMode:
+    def test_vosk_init_success(self):
+        fake_vosk = MagicMock()
+        fake_vosk.Model.return_value = MagicMock()
+        fake_vosk.KaldiRecognizer.return_value = MagicMock()
+        with patch.dict("sys.modules", {"vosk": fake_vosk}):
+            with patch("actions.wake_word._ensure_vosk_model",
+                       return_value=Path("/fake/model")):
+                d = WakeWordDetector()
+                d._try_init_vosk()
+        assert d._vosk_ok is True
+        assert d._vosk is not None
+        assert d._vosk_recognizer is not None
+        fake_vosk.Model.assert_called_once()
+
+    def test_vosk_init_falls_back_when_model_missing(self):
+        fake_vosk = MagicMock()
+        with patch.dict("sys.modules", {"vosk": fake_vosk}):
+            with patch("actions.wake_word._ensure_vosk_model", return_value=None):
+                d = WakeWordDetector()
+                d._try_init_vosk()
+        assert d._vosk_ok is False
+        fake_vosk.Model.assert_not_called()
+
+    def test_vosk_init_falls_back_when_not_installed(self):
+        with patch.dict("sys.modules", {"vosk": None}):
+            d = WakeWordDetector()
+            d._try_init_vosk()
+        assert d._vosk_ok is False
+        assert d.using_porcupine is False
+
+    def test_vosk_loop_opens_stream_with_audio_config(self, mock_vosk_stream):
+        """The loop should open a 16 kHz mono int16 stream with the mic callback."""
+        mock_cls, _ = mock_vosk_stream
+        d, _ = _make_vosk_detector()
+        with _VoskLoopHarness(d):
+            pass
+        mock_cls.assert_called_once_with(
+            samplerate=SAMPLE_RATE,
+            channels=1,
+            dtype="int16",
+            blocksize=SAMPLE_RATE // 2,
+            callback=ANY,
+        )
+
+    def test_vosk_loop_detects_keyword_from_streamed_audio(self, mock_vosk_stream):
+        """Feeding real PCM through the captured callback with the keyword in the
+        partial transcript must fire on_detected, feed the exact bytes to the
+        recognizer, and reset it for the next phrase."""
+        d, fake_recognizer = _make_vosk_detector(partial_text="hey jarvis what time is it")
+        wake_event = threading.Event()
+        d.on_detected = lambda: wake_event.set()
+
+        with _VoskLoopHarness(d) as h:
+            audio = _make_audio_chunk(rms_level=120, num_frames=SAMPLE_RATE // 2)
+            h.feed(audio)
+
+            assert wake_event.wait(timeout=1.0), \
+                "keyword in the audio stream should fire the wake callback"
+            fake_recognizer.AcceptWaveform.assert_called_with(audio)
+            fake_recognizer.Reset.assert_called_once()
+
+    def test_vosk_loop_ignores_stream_without_keyword(self, mock_vosk_stream):
+        """Audio whose transcript has no keyword must not fire a wake or reset."""
+        d, fake_recognizer = _make_vosk_detector(partial_text="good morning everyone")
+        wake_event = threading.Event()
+        d.on_detected = lambda: wake_event.set()
+
+        with _VoskLoopHarness(d) as h:
+            h.feed(_make_audio_chunk(rms_level=120, num_frames=SAMPLE_RATE // 2))
+
+            assert _wait_until(lambda: fake_recognizer.AcceptWaveform.called), \
+                "audio should be fed to the recognizer"
+            assert not wake_event.is_set(), \
+                "wake must not fire when the keyword is absent"
+            fake_recognizer.Reset.assert_not_called()
+
+    def test_vosk_loop_keyword_match_is_case_insensitive(self, mock_vosk_stream):
+        """The loop should match the keyword regardless of case and punctuation."""
+        d, _ = _make_vosk_detector(partial_text="Hey JARVIS, are you there?")
+        wake_event = threading.Event()
+        d.on_detected = lambda: wake_event.set()
+
+        with _VoskLoopHarness(d) as h:
+            h.feed(_make_audio_chunk(rms_level=120, num_frames=SAMPLE_RATE // 2))
+
+            assert wake_event.wait(timeout=1.0), \
+                "case differences should not block keyword detection"
+
+    def test_vosk_loop_handles_continuous_stream_of_chunks(self, mock_vosk_stream):
+        """Two successive audio bursts (keyword appearing only in the second)
+        should both be processed — a real mic delivers an endless stream."""
+        fake_recognizer = MagicMock()
+        fake_recognizer.PartialResult.side_effect = [
+            json.dumps({"partial": "just chatting with friends"}),
+            json.dumps({"partial": "hey jarvis open the browser"}),
+        ]
+        d = WakeWordDetector(keyword="jarvis")
+        d._vosk_ok = True
+        d._vosk_recognizer = fake_recognizer
+        wake_event = threading.Event()
+        d.on_detected = lambda: wake_event.set()
+
+        # Determinism relies on the loop calling AcceptWaveform only AFTER
+        # frame_bytes.clear(), so waiting on call_count guarantees the first
+        # burst was fully consumed before the second one is fed.
+        with _VoskLoopHarness(d) as h:
+            h.feed(_make_audio_chunk(rms_level=120, num_frames=SAMPLE_RATE // 2))
+            assert _wait_until(lambda: fake_recognizer.AcceptWaveform.call_count >= 1)
+            assert not wake_event.is_set(), "first burst has no keyword"
+
+            h.feed(_make_audio_chunk(rms_level=120, num_frames=SAMPLE_RATE // 2))
+            assert wake_event.wait(timeout=1.0), \
+                "keyword in a later chunk should still fire the wake"
+            fake_recognizer.Reset.assert_called_once()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -394,6 +619,7 @@ class TestRobustness:
 def test_main_block_exists():
     """The module should have a __main__ guard for standalone testing."""
     import inspect
+
     import actions.wake_word as ww_mod
     mod_source = inspect.getsource(ww_mod)
     assert 'if __name__ == "__main__":' in mod_source
