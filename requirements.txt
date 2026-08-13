@@ -35,6 +35,7 @@ google-generativeai
 google-genai
 torch
 pynvml
+mediapipe
 
 # ── Web & Networking ──────────────────────────────────────────────────────────
 requests

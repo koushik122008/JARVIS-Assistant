@@ -306,6 +306,28 @@ TOOL_DECLARATIONS = [
         "parameters": {"type": "OBJECT", "properties": {}, "required": []}
     },
     {
+        "name": "design_mode",
+        "description": (
+            "Hand-gesture air-drawing on the live webcam feed (a virtual whiteboard). "
+            "Start it when the user says 'design mode', 'start design mode' or "
+            "'open design mode' — JARVIS opens the camera and the user draws in the "
+            "air with their index finger, erases with an open palm, selects colours "
+            "from an on-screen palette with two fingers, and holds pinch gestures "
+            "to clear or save the canvas. "
+            "Use action='stop' when the user says 'exit design mode', 'stop design "
+            "mode' or 'close design mode'; use action='save' for 'save drawing'. "
+            "The window also closes with the Q key. "
+            "Do NOT call open_camera or screen_process while design mode is active."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "start | stop | save (default: start)"}
+            },
+            "required": []
+        }
+    },
+    {
         "name": "computer_settings",
         "description": (
             "Controls the computer: volume, brightness, window management, keyboard shortcuts, "
@@ -1042,6 +1064,25 @@ class JarvisLive:
             elif name == "close_camera":
                 self.ui.stop_camera_stream()
                 result = "Camera closed."
+
+            elif name == "design_mode":
+                # Lazy import — design_mode pulls in mediapipe + cv2 (heavy), so
+                # it is only imported when the tool is actually called.
+                from actions.design_mode import (
+                    start_design_mode,
+                    stop_design_mode,
+                    save_drawing,
+                )
+                _dm_action = (args.get("action") or "start").strip().lower()
+
+                def _run_design_mode():
+                    if _dm_action == "stop":
+                        return stop_design_mode()
+                    if _dm_action == "save":
+                        return save_drawing()
+                    return start_design_mode(speak=self.speak, ui=self.ui)
+
+                result = await loop.run_in_executor(None, _run_design_mode)
 
             elif name == "computer_settings":
                 r = await loop.run_in_executor(None, lambda: computer_settings(parameters=args, response=None, player=self.ui))
