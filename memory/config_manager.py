@@ -107,3 +107,55 @@ def get_background_wake_enabled() -> bool:
 def save_background_wake_enabled(enabled: bool) -> None:
     """Persist the cold-start wake toggle."""
     save_config({"background_wake_enabled": bool(enabled)})
+
+
+def get_metrics_panel_collapsed() -> bool:
+    """Return whether the SYS MONITOR column starts collapsed (default False)."""
+    return bool(load_config().get("metrics_panel_collapsed", False))
+
+
+def save_metrics_panel_collapsed(collapsed: bool) -> None:
+    """Persist the SYS MONITOR collapsed state across restarts."""
+    save_config({"metrics_panel_collapsed": bool(collapsed)})
+
+
+def get_camera_sensing_enabled() -> bool:
+    """Return whether continuous camera sensing is enabled (default False).
+
+    Off by default because sensing keeps the webcam warm while JARVIS runs;
+    the user opts in via the config or the settings toggle.
+    """
+    return bool(load_config().get("camera_sensing_enabled", False))
+
+
+def save_camera_sensing_enabled(enabled: bool) -> None:
+    """Persist the camera sensing toggle."""
+    save_config({"camera_sensing_enabled": bool(enabled)})
+
+
+def get_camera_sensing_scene_ai() -> bool:
+    """Return whether AI scene analysis (Gemini vision) is enabled (default False).
+
+    Costs an API call per run, so it stays opt-in.
+    """
+    return bool(load_config().get("camera_sensing_scene_ai", False))
+
+
+def save_camera_sensing_scene_ai(enabled: bool) -> None:
+    """Persist the AI scene analysis toggle."""
+    save_config({"camera_sensing_scene_ai": bool(enabled)})
+
+
+def get_camera_sensing_privacy() -> bool:
+    """Return whether camera sensing runs in privacy mode (default False).
+
+    Privacy mode performs local detection only — motion / person / ambient —
+    and never invokes the AI scene hook, so no camera frame leaves the device.
+    Detection events are still reported to the activity log and HUD.
+    """
+    return bool(load_config().get("camera_sensing_privacy", False))
+
+
+def save_camera_sensing_privacy(enabled: bool) -> None:
+    """Persist the camera sensing privacy mode toggle."""
+    save_config({"camera_sensing_privacy": bool(enabled)})

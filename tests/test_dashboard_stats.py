@@ -3,8 +3,11 @@ Tests for the JARVIS dashboard plugin-stats aggregators
 (dashboard/server.py — habits / expenses / workouts).
 """
 
+import asyncio
 import json
 from datetime import date, timedelta
+from unittest import mock
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -146,3 +149,45 @@ def test_stats_endpoint_auth():
     r = client.get("/api/stats", headers={"Authorization": "Bearer tok123"})
     assert r.status_code == 200
     assert set(r.json()) == {"habits", "expenses", "workouts"}
+
+
+# ── Client-aware broadcast (idle fast-path) ────────────────────────────────────
+
+def test_has_clients_false_when_nobody_connected():
+    srv = dash.DashboardServer()
+    assert srv.has_clients() is False
+
+
+def test_has_clients_true_when_a_client_is_connected():
+    srv = dash.DashboardServer()
+    srv._clients.add(object())
+    assert srv.has_clients() is True
+    srv._clients.clear()
+    assert srv.has_clients() is False
+
+
+def test_broadcast_keeps_history_but_sends_nothing_without_clients():
+    """With zero clients, history still grows (for replay-on-connect) but nothing sends."""
+    srv = dash.DashboardServer()
+    asyncio.run(srv.broadcast({"type": "log", "text": "hello"}))
+    assert len(srv._history) == 1          # replay-on-connect preserved
+    assert srv.has_clients() is False
+
+
+def test_broadcast_grows_history_and_sends_when_clients_exist():
+    srv = dash.DashboardServer()
+    fake = mock.MagicMock()
+    fake.send_json = AsyncMock()
+    srv._clients.add(fake)
+    asyncio.run(srv.broadcast({"type": "log", "text": "hello"}))
+    assert len(srv._history) == 1
+    fake.send_json.assert_awaited_once()
+
+
+def test_broadcast_drops_dead_clients():
+    srv = dash.DashboardServer()
+    dead = mock.MagicMock()
+    dead.send_json = AsyncMock(side_effect=RuntimeError("gone"))
+    srv._clients.add(dead)
+    asyncio.run(srv.broadcast({"type": "log", "text": "x"}))
+    assert srv.has_clients() is False

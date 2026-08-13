@@ -25,20 +25,34 @@ class ProactiveEngine:
         self.min_silence_secs = min_silence_secs
         self.check_cooldown   = check_cooldown
         self._last_triggered  = 0.0
+        self._person_pending  = False
 
     def should_trigger(self, last_user_speech: float) -> bool:
         """
         Returns True only when:
           • user has been silent long enough, AND
           • enough time has passed since the last proactive message.
+
+        A pending person-arrival event waives the silence requirement (the
+        camera just saw someone appear — a greeting check is fair game), but
+        the cooldown still applies so it never spams.
         """
         now     = time.monotonic()
         silence = now - last_user_speech
         gap     = now - self._last_triggered
+        if self._person_pending and gap >= self.check_cooldown:
+            return True
         return silence >= self.min_silence_secs and gap >= self.check_cooldown
 
     def mark_triggered(self) -> None:
         self._last_triggered = time.monotonic()
+        self._person_pending = False
+
+    def note_person_arrival(self) -> None:
+        """Mark that the camera just sensed a person arrive. Makes the next
+        proactive check eligible immediately (cooldown still respected), so a
+        natural greeting can fire ~a minute after someone walks in."""
+        self._person_pending = True
 
     def build_prompt(self, memory: dict) -> str:
         """

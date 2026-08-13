@@ -287,6 +287,364 @@ class TestHudCanvasLiveTimer:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Adaptive FPS — HUD animation rate throttled while idle/sleeping (low-spec)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestAdaptiveFps:
+    def test_hud_speeds_up_when_active_and_slows_when_sleeping(self):
+        hud = ui.HudCanvas("")
+        hud._tmr.stop()
+        hud.state = "SLEEPING"
+        hud._step()
+        assert hud._tmr.interval() == 250     # nearly frozen while sleeping
+        hud.state = "SPEAKING"
+        hud._step()
+        assert hud._tmr.interval() == 16      # full 60 fps while animating
+        hud.state = "LISTENING"
+        hud._step()
+        assert hud._tmr.interval() == 33      # moderate rate at rest
+
+    def test_radar_throttles_when_sleeping(self):
+        radar = ui.RadarWidget()
+        radar._tmr.stop()
+        radar.set_state("SLEEPING")
+        radar._step()
+        assert radar._tmr.interval() == 250
+        radar.set_state("THINKING")
+        radar._step()
+        assert radar._tmr.interval() == 50
+
+    def test_scan_line_throttles_when_sleeping(self):
+        scan = ui.ScanLineOverlay()
+        scan._tmr.stop()
+        scan.set_state("SLEEPING")
+        scan._step()
+        assert scan._tmr.interval() == 250
+        scan.set_state("PROCESSING")
+        scan._step()
+        assert scan._tmr.interval() == 30
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ui._camera_tier — camera stream adaptive capture rate (low-spec)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestCameraTier:
+    def test_active_is_full_rate_full_quality(self):
+        interval, quality = ui._camera_tier("active")
+        assert interval == 0.033
+        assert quality == 65
+
+    def test_background_throttles_rate_and_quality(self):
+        interval, quality = ui._camera_tier("background")
+        assert interval == 0.1          # 10 fps instead of 30
+        assert quality == 55
+
+    def test_hidden_disables_capture_entirely(self):
+        interval, quality = ui._camera_tier("hidden")
+        assert quality < 0              # grab-only warm keep, no decode/encode
+        assert interval > 0.1
+
+    def test_unknown_state_defaults_to_full_rate(self):
+        interval, quality = ui._camera_tier("")
+        assert interval == 0.033
+        assert quality == 65
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ui._perf_badge_text — HUD adaptive-FPS indicator (camera tier + dashboard link)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestPerfBadgeText:
+    def test_camera_off_dashboard_na_is_dim(self):
+        label, col = ui._perf_badge_text("active", False, None, 1.5)
+        assert label == "◈ CAM OFF · DASH N/A · POLL 1.5S"
+        assert col == ui.C.TEXT_DIM
+
+    def test_camera_off_dashboard_idle_is_amber(self):
+        label, col = ui._perf_badge_text("active", False, False, 1.5)
+        assert label == "◈ CAM OFF · DASH IDLE · POLL 1.5S"
+        assert col == ui.C.ACC2
+
+    def test_full_speed_is_green(self):
+        label, col = ui._perf_badge_text("active", True, True, 1.5)
+        assert label == "◈ CAM 30FPS · DASH LIVE · POLL 1.5S"
+        assert col == ui.C.GREEN
+
+    def test_camera_throttled_is_amber(self):
+        label, col = ui._perf_badge_text("background", True, True, 5.0)
+        assert label == "◈ CAM 10FPS · DASH LIVE · POLL 5S"
+        assert col == ui.C.ACC2
+
+    def test_camera_warm_when_hidden(self):
+        label, col = ui._perf_badge_text("hidden", True, False, 15.0)
+        assert label == "◈ CAM WARM · DASH IDLE · POLL 15S"
+        assert col == ui.C.ACC2
+
+    def test_unknown_camera_tier_falls_back(self):
+        label, _ = ui._perf_badge_text("weird", True, True, 1.5)
+        assert label == "◈ CAM -- · DASH LIVE · POLL 1.5S"
+
+    def test_throttled_poll_turns_full_speed_amber(self):
+        # Camera + dashboard at full speed, but the SYS MONITOR poll is slowed
+        # (collapsed panel) — throttling is engaged, so amber not green.
+        label, col = ui._perf_badge_text("active", True, True, 15.0)
+        assert label == "◈ CAM 30FPS · DASH LIVE · POLL 15S"
+        assert col == ui.C.ACC2
+
+
+class TestPerfBadgeWiring:
+    """Badge overlay + dashboard-state signal: dedup and show/hide behaviour."""
+
+    @pytest.fixture
+    def win(self):
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])
+        w = ui.MainWindow("")
+        yield w
+        w._perf_badge.deleteLater()
+        w.deleteLater()
+
+    def test_set_dashboard_state_emits_only_on_change(self, win):
+        received = []
+        win._dash_sig.connect(received.append)  # same-thread: direct connection
+        win.set_dashboard_state(True)
+        win.set_dashboard_state(True)   # no change → no second emit
+        win.set_dashboard_state(False)
+        win.set_dashboard_state(False)  # no change → no second emit
+        assert received == [True, False]
+        # Disabling the server clears the tracked state (None)
+        win.set_dashboard_state(None)
+        assert win._dash_live is None
+
+    def test_badge_stays_visible_as_sensing_toggle(self, win):
+        win.show()
+        win._cam_on = False
+        win._dash_live = None
+        win._refresh_perf_badge()
+        # The chip doubles as the camera-sensing toggle — it stays visible with
+        # a neutral SENSE OFF marker so sensing can always be clicked back on.
+        assert win._perf_badge.isVisible()
+        assert "SENSE OFF" in win._perf_badge.text()
+        # Camera on → chip appears with the camera tier
+        win._cam_on = True
+        win._cam_win_state = "background"
+        win._refresh_perf_badge()
+        assert win._perf_badge.isVisible()
+        # Camera off but dashboard server live → chip stays for link status
+        win._cam_on = False
+        win._dash_live = True
+        win._refresh_perf_badge()
+        assert win._perf_badge.isVisible()
+        win.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Adaptive psutil throttling — _metrics_interval tiers + _SysMetrics.set_interval
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestMetricsInterval:
+    def test_full_cadence_when_panel_visible_and_window_active(self):
+        assert ui._metrics_interval("active", True) == 1.5
+
+    def test_background_window_slows_to_five_seconds(self):
+        assert ui._metrics_interval("background", True) == 5.0
+
+    def test_hidden_window_slows_to_fifteen_seconds(self):
+        assert ui._metrics_interval("hidden", True) == 15.0
+
+    def test_collapsed_panel_slows_even_while_window_active(self):
+        assert ui._metrics_interval("active", False) == 15.0
+
+
+class TestSysMetricsSetInterval:
+    def test_set_interval_clamps_and_wakes(self):
+        import threading
+        s = object.__new__(ui._SysMetrics)   # no worker thread or psutil needed
+        s._interval = 1.5
+        s._wake = threading.Event()
+        s.set_interval(0.05)                 # clamped up — no busy-loop risk
+        assert s._interval == 0.5
+        assert s._wake.is_set()
+        s._wake.clear()
+        s.set_interval(10.0)
+        assert s._interval == 10.0
+        assert s._wake.is_set()
+
+
+class TestMetricsToggleWiring:
+    """Collapsing the SYS MONITOR column hides the gauges and slows the psutil
+    poll loop + metrics UI timer to the slowest tier."""
+
+    @pytest.fixture
+    def saved_collapsed(self):
+        from memory import config_manager as cm
+        snap = cm.get_metrics_panel_collapsed()
+        yield
+        cm.save_metrics_panel_collapsed(snap)
+
+    @pytest.fixture
+    def win(self, saved_collapsed):
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])
+        w = ui.MainWindow("")
+        w.show()
+        w._cam_win_state = "active"      # deterministic tier for the assertions
+        w._apply_metrics_interval()
+        yield w
+        w._perf_badge.deleteLater()
+        w.deleteLater()
+
+    def test_toggle_collapses_box_and_slows_polling(self, win):
+        assert win._left_metrics_visible is True
+        assert win._metric_tmr.interval() == 2000
+        win._metrics_toggle.click()
+        assert win._left_metrics_visible is False
+        assert not win._left_metrics_box.isVisible()
+        assert win._metric_tmr.interval() == 15000
+        assert "POLL 15S" in win._perf_badge.text()   # chip follows the tier
+        win._metrics_toggle.click()
+        assert win._left_metrics_visible is True
+        assert win._left_metrics_box.isVisible()
+        assert win._metric_tmr.interval() == 2000
+        assert "POLL 1.5S" in win._perf_badge.text()
+
+    def test_toggle_persists_collapsed_state(self, win, saved_collapsed):
+        from memory import config_manager as cm
+        win._metrics_toggle.click()
+        assert cm.get_metrics_panel_collapsed() is True
+        win._metrics_toggle.click()
+        assert cm.get_metrics_panel_collapsed() is False
+
+
+class TestMetricsPanelPersistence:
+    """The SYS MONITOR collapsed state survives restarts via the config manager."""
+
+    @pytest.fixture
+    def saved_collapsed(self):
+        from memory import config_manager as cm
+        snap = cm.get_metrics_panel_collapsed()
+        yield
+        cm.save_metrics_panel_collapsed(snap)
+
+    def test_config_roundtrip(self, saved_collapsed):
+        from memory import config_manager as cm
+        cm.save_metrics_panel_collapsed(True)
+        assert cm.get_metrics_panel_collapsed() is True
+        cm.save_metrics_panel_collapsed(False)
+        assert cm.get_metrics_panel_collapsed() is False
+
+    def test_window_starts_collapsed_from_config(self, saved_collapsed):
+        from memory import config_manager as cm
+        from PyQt6.QtWidgets import QApplication
+        cm.save_metrics_panel_collapsed(True)
+        app = QApplication.instance() or QApplication([])
+        w = ui.MainWindow("")
+        try:
+            w.show()
+            assert w._left_metrics_visible is False
+            assert not w._left_metrics_box.isVisible()   # meaningful: window shown
+            assert w._metrics_toggle.text() == "◈ SYS MONITOR  ▸"
+            assert w._metric_tmr.interval() == 15000   # slow tier from the start
+        finally:
+            w._perf_badge.deleteLater()
+            w.deleteLater()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ACTIVITY LOG pause/resume — LogWidget typewriter + collapse toggle
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestLogWidgetPauseResume:
+    @pytest.fixture
+    def log(self):
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])
+        l = ui.LogWidget()
+        yield l
+        l.deleteLater()
+
+    def test_pause_freezes_typewriter_and_queues_messages(self, log):
+        log.pause()
+        assert log._paused is True
+        assert not log._tmr.isActive()
+        # New messages queue while paused, but typing does not start.
+        log.append_log("hello")
+        assert log._queue == ["hello"]
+        assert log._typing is False
+
+    def test_resume_restarts_typing_from_queue(self, log):
+        log.pause()
+        log.append_log("hello")
+        log.resume()
+        assert log._paused is False
+        assert log._typing is True           # _next() popped the queue, armed the timer
+        assert log._queue == []
+
+    def test_step_is_a_noop_while_paused(self, log):
+        log.append_log("hello")             # starts typing synchronously
+        assert log._typing is True
+        log.pause()
+        pos = log._pos
+        log._step()
+        assert log._pos == pos               # frozen mid-message
+        assert not log._tmr.isActive()
+        log.resume()
+        assert log._paused is False
+
+    def test_resume_between_messages_leaves_gap_to_pending_singleshot(self, log):
+        # Simulate the 20 ms gap: a message is fully typed, _typing is still
+        # True, and the next message is queued. resume() must NOT restart the
+        # typewriter here — the pending singleShot advances exactly once.
+        log._text = "hi"
+        log._pos = 2
+        log._typing = True
+        log._queue = ["next"]
+        log._paused = True
+        log.resume()
+        assert log._paused is False
+        assert log._typing is True           # untouched — singleShot advances
+        assert not log._tmr.isActive()       # timer not restarted (no double \n)
+
+
+class TestLogToggleWiring:
+    """Collapsing the ACTIVITY LOG section hides the log, pauses its typewriter
+    and stops the header clock; expanding restores all three."""
+
+    @pytest.fixture
+    def win(self):
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])
+        w = ui.MainWindow("")
+        w.show()
+        yield w
+        w._perf_badge.deleteLater()
+        w.deleteLater()
+
+    def test_toggle_collapses_log_and_pauses_refreshes(self, win):
+        assert win._log_panel_visible is True
+        assert win._clock_tmr.isActive()
+        win._log_toggle.click()
+        assert win._log_panel_visible is False
+        assert not win._log.isVisible()
+        assert win._log._paused is True
+        assert not win._log._tmr.isActive()
+        assert not win._clock_tmr.isActive()
+        assert win._log_toggle.text() == "▸ ACTIVITY LOG"
+        win._log_toggle.click()
+        assert win._log_panel_visible is True
+        assert win._log.isVisible()
+        assert win._log._paused is False
+        assert win._clock_tmr.isActive()
+        assert win._log_toggle.text() == "▾ ACTIVITY LOG"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # ui.HelpOverlay — the "What can I do?" quick-reference panel
 # ═══════════════════════════════════════════════════════════════════════════════
 

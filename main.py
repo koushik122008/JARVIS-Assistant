@@ -36,7 +36,7 @@ from memory.memory_manager import (
 )
 from memory.config_manager import (
     get_brief_enabled, get_wake_word_keyword, get_wake_word_sensitivity,
-    get_proactive_enabled,
+    get_proactive_enabled, get_background_wake_enabled,
 )
 
 from actions.file_processor import file_processor
@@ -55,7 +55,6 @@ from actions.crypto_prices     import crypto_prices
 from actions.stock_prices      import stock_prices
 from actions.translator        import translate_text
 from actions.computer_settings import computer_settings
-from actions.screen_processor  import _capture_camera, _capture_screen
 from actions.youtube_video     import youtube_video
 from actions.desktop           import desktop_control
 from actions.browser_control   import browser_control
@@ -275,7 +274,8 @@ TOOL_DECLARATIONS = [
             "look at camera, analyze my screen, etc. "
             "You have NO visual ability without this tool. "
             "After the image is captured it is sent directly to you — describe what you see and answer the user's question. "
-            "When using camera: the live view stays open until user says close it or calls close_camera."
+            "Camera angle captures a single still frame for analysis — it does NOT open the live feed. "
+            "If the user wants to SEE the camera feed on screen, call open_camera instead."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -285,6 +285,16 @@ TOOL_DECLARATIONS = [
             },
             "required": ["text"]
         }
+    },
+    {
+        "name": "open_camera",
+        "description": (
+            "Opens the live camera feed on screen so the user can see what the camera sees. "
+            "Call ONLY when the user explicitly asks to open/show/turn on the camera "
+            "(e.g. 'open camera', 'show me the camera', 'turn on the camera'). "
+            "The feed stays open until the user says close it or calls close_camera."
+        ),
+        "parameters": {"type": "OBJECT", "properties": {}, "required": []}
     },
     {
         "name": "close_camera",
@@ -420,7 +430,10 @@ TOOL_DECLARATIONS = [
             "(e.g. 'research the best budget laptops and write a summary report', "
             "'build a script that fetches stock prices, runs it, and saves a report'). "
             "Sub-agents: research (deep web research), web (browser pages), code "
-            "(write/run/fix code), file (local files), system (hardware status). "
+            "(write/run/fix code), file (local files), system (hardware status), "
+            "media (images & YouTube), finance (stocks/crypto/currency), translate, "
+            "productivity (notes/habits/timers), travel (weather/flights), apps "
+            "(open apps & control the computer). "
             "For anything a single tool can do, use that tool directly — never this."
         ),
         "parameters": {
@@ -432,7 +445,7 @@ TOOL_DECLARATIONS = [
                 },
                 "agent": {
                     "type": "STRING",
-                    "description": "Optional: force one agent — auto (default) | research | web | code | file | system"
+                    "description": "Optional: force one agent — auto (default) | research | web | code | file | system | media | finance | translate | productivity | travel | apps"
                 },
                 "context": {
                     "type": "STRING",
@@ -763,14 +776,13 @@ class JarvisLive:
         self._speaking_lock       = threading.Lock()
         self._phone_active        = False   # True while phone mic is streaming; pauses PC mic
         self._pending_vision       = None    # (img_bytes, mime_type, question, angle) to inject after tool response
-        self._vision_cam_active    = False   # True if camera was opened for vision → auto-close after response
-        self._vision_close_pending = False   # True after vision injected; next turn_complete closes camera
         self._vision_last_time     = 0.0     # monotonic time of last screen_process call (cooldown guard)
         self._vision_busy          = False   # True while a vision capture/inject cycle is in flight
         self._interrupted          = False   # True while draining audio after user interrupt
         self.ui.on_text_command   = self._on_text_command
         self.ui.on_remote_clicked = self._make_remote_key
         self.ui.on_interrupt      = self.interrupt
+        self.ui.on_sense_state    = self._on_sense_state
         self._turn_done_event: asyncio.Event | None = None
         self._dashboard     = None
         self._briefing_sent    = False          # morning briefing fires once per process
@@ -948,7 +960,7 @@ class JarvisLive:
                 out = await loop.run_in_executor(None, lambda: generate_image_action(args))
                 result = out["result"]
                 # Send the generated image to the remote dashboard if connected
-                if out.get("image_bytes") and self._dashboard:
+                if out.get("image_bytes") and self._dashboard and self._dashboard.has_clients():
                     import base64
                     img_b64 = base64.b64encode(out["image_bytes"]).decode()
                     asyncio.create_task(self._dashboard.broadcast({
@@ -990,6 +1002,9 @@ class JarvisLive:
                 result = r or "Done."
 
             elif name == "screen_process":
+                # Lazy import — screen_processor pulls in cv2 + mss + PIL (~200 MB,
+                # 1-2 s import). Deferring it keeps startup fast on low-spec machines.
+                from actions.screen_processor import _capture_camera, _capture_screen
                 import time as _t_mod
                 _now = _t_mod.monotonic()
                 _cooldown = 4.0  # seconds — covers echo window after speaking ends
@@ -1004,8 +1019,8 @@ class JarvisLive:
                     user_text = args.get("text", "What do you see?")
                     if angle == "camera":
                         img_b, mime_t = await loop.run_in_executor(None, _capture_camera)
-                        self.ui.start_camera_stream()
-                        self._vision_cam_active = True
+                        # Single still for vision analysis only — the live feed is
+                        # opened exclusively by the open_camera tool.
                         print(f"[Vision] 📷 Camera: {len(img_b):,} bytes")
                         _stall = "camera"
                     else:
@@ -1019,6 +1034,10 @@ class JarvisLive:
                         f"telling them you are looking at their {_stall} right now. "
                         f"Do NOT describe or guess content — the actual image arrives in the NEXT message."
                     )
+
+            elif name == "open_camera":
+                self.ui.start_camera_stream()
+                result = "Camera feed opened."
 
             elif name == "close_camera":
                 self.ui.stop_camera_stream()
@@ -1243,7 +1262,7 @@ class JarvisLive:
                             full_in = " ".join(in_buf).strip()
                             if full_in:
                                 self.ui.write_log(f"You: {full_in}")
-                                if self._dashboard:
+                                if self._dashboard and self._dashboard.has_clients():
                                     asyncio.create_task(self._dashboard.broadcast({
                                         "type": "log", "speaker": "user",
                                         "text": full_in,
@@ -1254,7 +1273,7 @@ class JarvisLive:
                             full_out = " ".join(out_buf).strip()
                             if full_out:
                                 self.ui.write_log(f"{self._asst_name}: {full_out}")
-                                if self._dashboard:
+                                if self._dashboard and self._dashboard.has_clients():
                                     asyncio.create_task(self._dashboard.broadcast({
                                         "type": "log", "speaker": "jarvis",
                                         "text": full_out,
@@ -1276,22 +1295,9 @@ class JarvisLive:
                                     ]},
                                     turn_complete=True,
                                 )
-                                # Mark next turn_complete behaviour depending on angle
-                                if self._vision_cam_active:
-                                    # Camera: keep busy until JARVIS finishes speaking the answer
-                                    self._vision_cam_active    = False
-                                    self._vision_close_pending = True
-                                else:
-                                    # Screen-only: no camera to close; release busy flag now
-                                    self._vision_busy = False
-                            elif self._vision_close_pending:
-                                # This turn_complete IS the vision answer — close camera + release busy flag
-                                self._vision_close_pending = False
+                                # Single still for vision — nothing to keep open;
+                                # release the busy flag straight away.
                                 self._vision_busy = False
-                                async def _cam_close():
-                                    await asyncio.sleep(2.0)
-                                    self.ui.stop_camera_stream()
-                                asyncio.create_task(_cam_close())
 
                     if response.tool_call:
                         fn_responses = []
@@ -1604,6 +1610,72 @@ class JarvisLive:
         self.ui.write_log(f"SYS: Proactive check-ins {state}.")
         print(f"[Proactive] {state} by user.")
 
+    def _on_sense_state(self, snap) -> None:
+        """Called from the UI thread when camera sensing state changes.
+
+        A person appearing at the camera (after an absence) fast-tracks a
+        proactive check-in: JARVIS marks the moment as if the user just spoke,
+        so the greeting check fires on the next 60 s cycle without ever
+        auto-speaking. No automatic speech — Gemini still decides.
+        """
+        try:
+            if not snap:
+                return
+            person = bool(getattr(snap, "person", False))
+            if person and not getattr(self, "_sense_person_present", False):
+                # person just arrived — arm a proactive greeting check-in.
+                # No auto-speech: Gemini still decides whether (and what) to say.
+                if getattr(self, "_proactive", None) is not None:
+                    self._proactive.note_person_arrival()
+                self.ui.write_log("SENS: Person present — greeting check armed.")
+                self._arm_wake_on_person_arrival()
+            self._sense_person_present = person
+        except Exception as e:
+            print(f"[Sense] ⚠️ {e}")
+
+    def _arm_wake_on_person_arrival(self) -> None:
+        """Make JARVIS ready to hear the wake word the moment someone walks in.
+
+        Called (UI thread) on the person-arrival edge, only after an absence:
+
+        1. In-app detector — if the user has wake-word detection enabled, make
+           sure it is actually listening right now (it may have been paused
+           while JARVIS was speaking, or stopped entirely).
+        2. Wake-from-closed listener — if cold-start wake is enabled but its
+           always-on listener has died, restart it so 'hey jarvis' still
+           launches JARVIS even from a fully closed app.
+
+        Both respect the user's toggles: nothing is force-enabled, only
+        restored/kept ready.
+        """
+        try:
+            restored = False
+            det = getattr(self, "_wake_word_detector", None)
+            if det is not None:
+                if det.is_running:
+                    det.resume()      # wake it if it was paused during speech
+                else:
+                    det.start()       # user enabled it once — restore listening
+                    restored = True
+            # Cold-start path: restart a dead wake-from-closed listener.
+            if get_background_wake_enabled():
+                try:
+                    from actions.background_wake import _listener_pids, start_listener
+                    if not _listener_pids():
+                        if start_listener():
+                            self.ui.write_log(
+                                "SYS: Wake-from-closed listener restarted (person arrived).")
+                except Exception:
+                    pass
+            # Only announce when listening was actually restored — a detector
+            # that was already active needs no fanfare on every arrival.
+            if restored:
+                kw = get_wake_word_keyword()
+                self.ui.write_log(
+                    f"SYS: Listening — say '{kw.title()}' anytime.")
+        except Exception as e:
+            print(f"[Sense] ⚠️ Wake-arm failed: {e}")
+
     def _on_wake_word_settings_changed(self):
         """Called from UI thread when user changes keyword/sensitivity in settings.
         Restarts the detector with new values if it's currently running."""
@@ -1656,9 +1728,17 @@ class JarvisLive:
 
     async def _process_dashboard_commands(self) -> None:
         while True:
+            # Adaptive polling: tight 0.5 s loop only while a dashboard client is
+            # connected; when nobody is watching, wake ~5× less often so the
+            # event loop stays quiet on low-spec machines.
+            timeout = 0.5 if self._dashboard.has_clients() else 2.5
+            try:
+                self.ui.set_dashboard_state(self._dashboard.has_clients())
+            except Exception:
+                pass
             try:
                 text = await asyncio.wait_for(
-                    self._dashboard._command_queue.get(), timeout=0.5
+                    self._dashboard._command_queue.get(), timeout=timeout
                 )
                 if not text:
                     continue
@@ -1725,8 +1805,6 @@ class JarvisLive:
 
                     # Reset transient state that must not carry over from a previous session
                     self._pending_vision       = None
-                    self._vision_cam_active    = False
-                    self._vision_close_pending = False
                     self._vision_busy          = False
                     self._vision_last_time     = 0.0
                     self._interrupted          = False

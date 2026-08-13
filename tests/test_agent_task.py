@@ -6,6 +6,8 @@ tool handlers (`_import_action`) are patched. Mirrors the approach used by
 test_regressions.py for dev_agent.
 """
 
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -29,12 +31,30 @@ class TestRegistry:
             assert agent["name"] == name
             assert callable(agent["run"])
 
+    def test_new_agents_exposed(self):
+        assert {"media", "finance", "translate", "productivity", "travel", "apps"} \
+            <= set(at.AGENTS)
+
     def test_heuristic_routing(self):
         assert at._heuristic_agent("build me a python script that renames files") == "code"
         assert at._heuristic_agent("read my notes file and summarize it") == "file"
         assert at._heuristic_agent("open github.com and tell me the star count") == "web"
         assert at._heuristic_agent("check cpu, ram and battery") == "system"
         assert at._heuristic_agent("what is the latest news about AI") == "research"
+
+    def test_heuristic_routing_new_agents(self):
+        assert at._heuristic_agent("generate an image of a sunset") == "media"
+        assert at._heuristic_agent("play a youtube video about space") == "media"
+        assert at._heuristic_agent("what is the price of bitcoin") == "finance"
+        assert at._heuristic_agent("check AAPL stock price") == "finance"
+        assert at._heuristic_agent("convert 100 usd to eur") == "finance"
+        assert at._heuristic_agent("translate hello to spanish") == "translate"
+        assert at._heuristic_agent("save a note about the meeting") == "productivity"
+        assert at._heuristic_agent("log drink water habit") == "productivity"
+        assert at._heuristic_agent("weather in new york") == "travel"
+        assert at._heuristic_agent("find flights to paris") == "travel"
+        assert at._heuristic_agent("book a flight from london to new york") == "travel"
+        assert at._heuristic_agent("open chrome") == "apps"
 
     def test_strip_fences(self):
         assert at._strip_fences("```json\n{\"a\": 1}\n```") == "{\"a\": 1}"
@@ -111,6 +131,20 @@ class TestPlanning:
         ):
             at._plan("goal", "", 6)
 
+    def test_plan_normalizes_parallel_default(self):
+        fake = MagicMock()
+        fake.generate_content.return_value.text = '{"steps": [{"agent": "code", "task": "c"}]}'
+        with patch.object(at, "new_gemini_client", return_value=fake):
+            plan = at._plan("goal", "", 6)
+        assert plan["steps"][0]["parallel"] is False
+
+    def test_planner_prompt_mentions_parallel(self):
+        fake = MagicMock()
+        fake.generate_content.return_value.text = '{"steps": [{"agent": "research", "task": "q"}]}'
+        with patch.object(at, "new_gemini_client", return_value=fake):
+            at._plan("goal", "", 6)
+        assert "parallel" in fake.generate_content.call_args.args[0]
+
     def test_synthesize_returns_summary_and_report(self):
         fake = MagicMock()
         fake.generate_content.return_value.text = (
@@ -162,6 +196,98 @@ class TestExecution:
             out = at._run_agent("code", "t", _ctx())
         assert len(out) == at.MAX_RESULT_CHARS
 
+    def test_locked_speak_wraps_and_serializes(self):
+        assert at._locked_speak(None) is None
+        calls = []
+        fn = at._locked_speak(lambda text: calls.append(text))
+        fn("hello")
+        assert calls == ["hello"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Parallel wave execution (speed)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestParallelExecution:
+    def test_parallel_steps_run_concurrently(self):
+        plan = {"title": "t", "steps": [
+            {"agent": "research", "task": "q1", "parallel": True},
+            {"agent": "finance",  "task": "q2", "parallel": True},
+        ]}
+        lock, active, peak = threading.Lock(), 0, 0
+
+        def fake_run(name, task, ctx):
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.15)
+            with lock:
+                active -= 1
+            return f"result-{name}"
+
+        with (
+            patch.object(at, "MAX_PARALLEL", 3),
+            patch.object(at, "_run_agent", side_effect=fake_run),
+        ):
+            results = at._run_plan(plan, _ctx())
+
+        assert peak >= 2  # both ran at the same time
+        assert [r["agent"] for r in results] == ["research", "finance"]
+        assert all(isinstance(r.get("seconds"), (int, float)) for r in results)
+
+    def test_parallel_waves_do_not_overlap_sequential_steps(self):
+        plan = {"steps": [
+            {"agent": "research", "task": "q1", "parallel": True},
+            {"agent": "finance",  "task": "q2", "parallel": True},
+            {"agent": "code",     "task": "q3"},
+            {"agent": "media",    "task": "q4", "parallel": True},
+            {"agent": "travel",   "task": "q5", "parallel": True},
+        ]}
+        events, lock = [], threading.Lock()
+
+        def fake_run(name, task, ctx):
+            t0 = time.monotonic()
+            time.sleep(0.1)
+            t1 = time.monotonic()
+            with lock:
+                events.append((name, t0, t1))
+            return name
+
+        with (
+            patch.object(at, "MAX_PARALLEL", 3),
+            patch.object(at, "_run_agent", side_effect=fake_run),
+        ):
+            results = at._run_plan(plan, _ctx())
+
+        # Results keep the planner's order regardless of concurrency.
+        assert [r["agent"] for r in results] == \
+            ["research", "finance", "code", "media", "travel"]
+        ev = {name: (s, e) for name, s, e in events}
+        ms, me = ev["code"]
+        # The sequential step overlaps neither wave.
+        for other in ("research", "finance", "media", "travel"):
+            os_, oe = ev[other]
+            assert not (os_ < me and ms < oe), f"sequential step overlapped {other}"
+        # Members of each wave overlap each other.
+        assert ev["research"][0] < ev["finance"][1] and ev["finance"][0] < ev["research"][1]
+        assert ev["media"][0] < ev["travel"][1] and ev["travel"][0] < ev["media"][1]
+
+    def test_non_parallel_plan_stays_sequential(self):
+        plan = {"steps": [
+            {"agent": "research", "task": "q1"},
+            {"agent": "code",     "task": "q2"},
+        ]}
+        calls = []
+        with patch.object(
+            at, "_run_agent",
+            side_effect=lambda n, t, c: (calls.append((n, t)) or f"r-{n}"),
+        ):
+            results = at._run_plan(plan, _ctx())
+        assert calls == [("research", "q1"), ("code", "q2")]
+        assert [r["agent"] for r in results] == ["research", "code"]
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Individual agents call the right tool handlers
@@ -212,6 +338,149 @@ class TestAgentsRun:
             out = at.AGENTS["system"]["run"]("check status", _ctx())
         assert "cpu: 12%" in out
         assert "battery: 80%" in out
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# New sub-agents (media, finance, translate, productivity, travel, apps)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestNewAgentsRun:
+    def test_media_agent_generates_image(self):
+        fake = MagicMock()
+        fake.generate_image.return_value = {"result": "Here you go.", "path": "C:\\x.png"}
+        with patch.object(at, "_import_action", return_value=fake):
+            out = at.AGENTS["media"]["run"]("generate an image of a cat", _ctx())
+        assert "Here you go" in out
+        assert "x.png" in out
+        assert fake.generate_image.call_args.kwargs["parameters"]["prompt"] == \
+            "generate an image of a cat"
+
+    def test_media_agent_youtube_play(self):
+        fake = MagicMock()
+        fake.youtube_video.return_value = "Playing."
+        with patch.object(at, "_import_action", return_value=fake):
+            out = at.AGENTS["media"]["run"]("play some relaxing music", _ctx())
+        assert out == "Playing."
+        assert fake.youtube_video.call_args.kwargs["parameters"]["action"] == "play"
+
+    def test_media_agent_image_beats_video_keyword(self):
+        # 'video game character' mentions 'video' but must stay in image generation
+        fake = MagicMock()
+        fake.generate_image.return_value = {"result": "ok", "path": "x.png"}
+        with patch.object(at, "_import_action", return_value=fake):
+            out = at.AGENTS["media"]["run"](
+                "generate an image of a video game character", _ctx())
+        assert fake.generate_image.called
+        assert not fake.youtube_video.called
+
+    def test_finance_agent_currency(self):
+        fake = MagicMock()
+        fake.currency_converter.return_value = "100 USD is about 92 EUR."
+        with patch.object(at, "_import_action", return_value=fake):
+            out = at.AGENTS["finance"]["run"]("convert 100 usd to eur", _ctx())
+        assert "92 EUR" in out
+        assert fake.currency_converter.called
+
+    def test_finance_agent_crypto(self):
+        fake = MagicMock()
+        fake.crypto_prices.return_value = "Bitcoin is up 2%."
+        with patch.object(at, "_import_action", return_value=fake):
+            out = at.AGENTS["finance"]["run"]("what is the price of bitcoin", _ctx())
+        assert "Bitcoin" in out
+        assert fake.crypto_prices.call_args.kwargs["parameters"]["asset"] == "bitcoin"
+
+    def test_finance_agent_stock(self):
+        fake = MagicMock()
+        fake.stock_prices.return_value = "AAPL is at $250."
+        with patch.object(at, "_import_action", return_value=fake):
+            out = at.AGENTS["finance"]["run"]("check AAPL stock price", _ctx())
+        assert "$250" in out
+        assert fake.stock_prices.call_args.kwargs["parameters"]["ticker"] == "AAPL"
+
+    def test_translate_agent(self):
+        fake = MagicMock()
+        fake.translate_text.return_value = "Hola."
+        with patch.object(at, "_import_action", return_value=fake):
+            out = at.AGENTS["translate"]["run"]("translate hello to spanish", _ctx())
+        assert out == "Hola."
+        kw = fake.translate_text.call_args.kwargs["parameters"]
+        assert kw["to"] == "spanish"
+        # the command verb must NOT be passed to the translator
+        assert kw["text"] == "hello"
+
+    def test_translate_agent_strips_say_verb(self):
+        fake = MagicMock()
+        fake.translate_text.return_value = "Bonjour."
+        with patch.object(at, "_import_action", return_value=fake):
+            out = at.AGENTS["translate"]["run"]("say good morning in french", _ctx())
+        assert out == "Bonjour."
+        assert fake.translate_text.call_args.kwargs["parameters"]["text"] == "good morning"
+
+    def test_travel_agent_weather(self):
+        fake = MagicMock()
+        fake.weather_action.return_value = "22°C and sunny in London."
+        with patch.object(at, "_import_action", return_value=fake):
+            out = at.AGENTS["travel"]["run"]("weather in london today", _ctx())
+        assert "London" in out
+        assert fake.weather_action.call_args.kwargs["parameters"]["city"] == "london"
+
+    def test_travel_agent_flights(self):
+        fake = MagicMock()
+        fake.flight_finder.return_value = "Best flight: TK 100."
+        with patch.object(at, "_import_action", return_value=fake):
+            out = at.AGENTS["travel"]["run"](
+                "find flights from istanbul to new york on 2026-12-20", _ctx())
+        assert "TK 100" in out
+        kw = fake.flight_finder.call_args.kwargs["parameters"]
+        assert kw["origin"] == "istanbul"
+        assert kw["destination"] == "new york"
+
+    def test_travel_agent_strips_flight_trailer(self):
+        fake = MagicMock()
+        fake.flight_finder.return_value = "Best flight: BA 202."
+        with patch.object(at, "_import_action", return_value=fake):
+            out = at.AGENTS["travel"]["run"](
+                "find a flight from london to paris tomorrow", _ctx())
+        assert "BA 202" in out
+        kw = fake.flight_finder.call_args.kwargs["parameters"]
+        assert kw["origin"] == "london"
+        assert kw["destination"] == "paris"
+
+    def test_travel_agent_city_strips_please(self):
+        assert at._extract_city("weather in london please") == "london"
+
+    def test_apps_agent_opens_app(self):
+        fake = MagicMock()
+        fake.open_app.return_value = "Opened chrome."
+        with patch.object(at, "_import_action", return_value=fake):
+            out = at.AGENTS["apps"]["run"]("open chrome", _ctx())
+        assert out == "Opened chrome."
+        assert fake.open_app.call_args.kwargs["parameters"]["app_name"] == "chrome"
+
+    def test_apps_agent_settings(self):
+        fake = MagicMock()
+        fake.computer_settings.return_value = "Volume up."
+        with patch.object(at, "_import_action", return_value=fake):
+            out = at.AGENTS["apps"]["run"]("turn volume up", _ctx())
+        assert out == "Volume up."
+        assert fake.computer_settings.call_args.kwargs["parameters"]["action"] == "volume_up"
+
+    def test_productivity_agent_notes(self):
+        fake = MagicMock()
+        fake.handle.return_value = "Note saved."
+        with patch.object(at, "_import_plugin", return_value=fake):
+            out = at.AGENTS["productivity"]["run"]("save a note about the meeting", _ctx())
+        assert out == "Note saved."
+        assert fake.handle.call_args.args[0]["action"] == "add"
+
+    def test_productivity_agent_reminder(self):
+        fake = MagicMock()
+        fake.reminder.return_value = "Reminder set."
+        with patch.object(at, "_import_action", return_value=fake):
+            out = at.AGENTS["productivity"]["run"]("remind me in 30 minutes", _ctx())
+        assert out == "Reminder set."
+        assert fake.reminder.called
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

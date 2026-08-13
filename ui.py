@@ -59,7 +59,7 @@ def _PLAY_WAV(path: str) -> None:
 
 
 from PyQt6.QtCore import (
-    QAbstractNativeEventFilter, QPointF, QRectF, Qt,
+    QAbstractNativeEventFilter, QEvent, QPointF, QRectF, Qt,
     QTimer, pyqtSignal,
 )
 from PyQt6.QtGui import (
@@ -112,6 +112,98 @@ if _OS == "Windows":
             return False, 0
 
 
+def _camera_tier(state: str) -> tuple[float, int]:
+    """Adaptive camera stream tier → (capture interval s, JPEG quality).
+
+    Mirrors the HUD's adaptive FPS: full 30 fps only while the JARVIS window
+    is focused and visible, throttled to 10 fps in the background, and nearly
+    frozen when the window is hidden/minimised — the camera stays warm but
+    no frames are decoded or encoded while nobody can see them.
+    """
+    if state == "hidden":
+        return 0.5, -1        # keep warm — do not capture/encode at all
+    if state == "background":
+        return 0.1, 55        # 10 fps, lighter JPEG
+    return 0.033, 65          # 30 fps, full quality
+
+
+def _metrics_interval(win_state: str, panel_visible: bool = True) -> float:
+    """Adaptive psutil poll + metrics-refresh rate (seconds).
+
+    Full 1.5 s cadence only while the SYS MONITOR panel is on screen and the
+    window is focused; 5 s in the background; 15 s when the panel is collapsed
+    or the window is hidden/minimised — the poll loop is pure overhead when
+    nobody can see the gauges.
+    """
+    if not panel_visible or win_state == "hidden":
+        return 15.0
+    if win_state == "background":
+        return 5.0
+    return 1.5
+
+
+def _sense_badge_segment(snapshot) -> tuple[str, str]:
+    """Camera-sensing chip segment → (text, colour). Empty label = inactive.
+
+    Person detection trumps motion; dark/dim ambient is reported only when
+    nothing more interesting is happening, so the chip stays calm at rest.
+    Privacy mode gets its own neutral marker (distinct from activity colours).
+    """
+    try:
+        lbl = snapshot.label() if snapshot is not None else ""
+        priv = bool(getattr(snapshot, "privacy", False)) if snapshot is not None else False
+    except Exception:
+        lbl, priv = "", False
+    if not lbl:
+        return "", C.TEXT_DIM
+    if priv:
+        # distinct violet marker — privacy mode is the one state the user must
+        # never miss, and it must never be mistaken for an activity colour.
+        return "SENSE PRIVATE", C.PURPLE
+    if "PERSON" in lbl or "SCENE" in lbl:
+        return f"SENSE {lbl}", C.GREEN
+    return f"SENSE {lbl}", C.ACC2
+
+
+def _perf_badge_text(cam_tier: str, cam_on: bool, dash_live: bool | None,
+                     poll_secs: float = 1.5, sense_label: str = "",
+                     sense_col: str = "") -> tuple[str, str]:
+    """HUD adaptive-FPS indicator → (label, accent colour).
+
+    Shows the live camera tier, the dashboard link state and the current
+    system-monitor poll tier so the user can see at a glance when low-spec
+    throttling is engaged:
+      - everything full speed → green
+      - any throttling        → amber
+      - everything idle       → dim
+    """
+    if cam_on:
+        cam = {"active": "CAM 30FPS", "background": "CAM 10FPS",
+               "hidden": "CAM WARM"}.get(cam_tier, "CAM --")
+    else:
+        cam = "CAM OFF"
+    if dash_live is None:
+        dash = "DASH N/A"
+    elif dash_live:
+        dash = "DASH LIVE"
+    else:
+        dash = "DASH IDLE"
+    poll = f"POLL {poll_secs:g}S"
+    base = f"◈ {cam} · {dash} · {poll}"
+    if sense_label:
+        base += f" · {sense_label}"
+    if sense_col and sense_col != C.TEXT_DIM:
+        col = sense_col      # sensing state (person/motion) dominates
+    elif cam_on and cam_tier == "active" and dash_live and poll_secs <= 1.5:
+        col = C.GREEN        # everything at full speed
+    elif cam_on or dash_live is not None or poll_secs > 1.5 \
+            or (sense_label and sense_col != C.TEXT_DIM):
+        col = C.ACC2         # adaptive throttling engaged somewhere
+    else:
+        col = C.TEXT_DIM     # everything off / idle
+    return base, col
+
+
 def _lerp_hex(a: str, b: str, t: float) -> str:
     """Interpolate between two '#rrggbb' hex colours (0 <= t <= 1)."""
     def _rgb(h: str):
@@ -157,6 +249,27 @@ class _HistoryLineEdit(QLineEdit):
                          else self.history[-self._hist_pos])
             return
         super().keyPressEvent(e)
+
+
+class _PerfBadge(QLabel):
+    """HUD adaptive-FPS chip — also the runtime camera-sensing toggle.
+
+    Clicking the chip flips camera sensing on/off (persisted via the config
+    manager). The pointer cursor signals clickability; the tooltip explains
+    the current state and that clicking toggles it.
+    """
+
+    clicked = pyqtSignal()
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(text, parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mouseReleaseEvent(self, e):
+        if (e.button() == Qt.MouseButton.LeftButton
+                and self.rect().contains(e.position().toPoint())):
+            self.clicked.emit()
+        super().mouseReleaseEvent(e)
 
 
 _HELP_TEXT = """\
@@ -274,6 +387,7 @@ class C:
     ACC       = "#ff6b00"
     ACC2      = "#ffcc00"
     GREEN     = "#00ff88"
+    PURPLE    = "#b388ff"
     GREEN_D   = "#00aa55"
     RED       = "#ff3355"
     MUTED_C   = "#ff3366"
@@ -434,6 +548,8 @@ class _SysMetrics:
         self._last_net = psutil.net_io_counters()
         self._last_net_t = time.time()
         self._running = True
+        self._interval = 1.5            # adaptive: slowed when the metrics panel is off-screen
+        self._wake = threading.Event()  # set to re-poll immediately on interval changes
         t = threading.Thread(target=self._loop, daemon=True)
         t.start()
 
@@ -443,7 +559,15 @@ class _SysMetrics:
                 self._update()
             except Exception:
                 pass
-            time.sleep(1.5)
+            self._wake.wait(self._interval)
+            self._wake.clear()
+
+    def set_interval(self, seconds: float) -> None:
+        """Adaptive poll rate — clamped so it can never busy-loop. Waking the
+        loop makes a new interval take effect immediately (thread-safe under the
+        GIL: the loop only ever reads the float, we only write it here)."""
+        self._interval = max(0.5, float(seconds))
+        self._wake.set()
 
     def _update(self):
         cpu = psutil.cpu_percent(interval=None)
@@ -606,6 +730,19 @@ class HudCanvas(QWidget):
         self._vu = max(self._vu, max(0.0, min(1.0, level)))
 
     def _step(self):
+        # Adaptive FPS: 60 fps only while actively animating (speaking/thinking),
+        # throttled while idle, nearly frozen while sleeping — saves most of the
+        # HUD's idle CPU on low-spec machines.
+        _st = self.state
+        if _st in ("SPEAKING", "THINKING", "PROCESSING"):
+            _target = 16
+        elif _st in ("SLEEPING", "STANDBY"):
+            _target = 250
+        else:
+            _target = 33
+        if self._tmr.interval() != _target:
+            self._tmr.setInterval(_target)
+
         self._tick += 1
         now = time.time()
         if now - self._last_t > (0.12 if self.speaking else 0.5):
@@ -637,8 +774,9 @@ class HudCanvas(QWidget):
             self._tgt_hc = C.PRI
         self._cur_hc = _lerp_hex(self._cur_hc, self._tgt_hc, 0.08)
 
-        # VU decays back to idle when the mic goes silent (gentle falloff)
-        self._vu *= 0.95
+        # VU decays back to idle when the mic goes silent — decay is normalised
+        # to the current FPS tier so the falloff feels identical when throttled.
+        self._vu *= 0.95 ** (self._tmr.interval() / 16)
         if self._vu < 0.004:
             self._vu = 0.0
 
@@ -986,6 +1124,7 @@ class RadarWidget(QWidget):
         self._tick = 0
         self._scan_angle = 0.0
         self._blips: list[dict] = []  # {angle, dist, life, metric}
+        self._state = "INITIALISING"  # drives adaptive FPS (see set_state)
         self._tmr = QTimer(self)
         self._tmr.timeout.connect(self._step)
         self._tmr.start(50)
@@ -1010,7 +1149,23 @@ class RadarWidget(QWidget):
         self.set_metric("NET", net)
         self.set_metric("GPU", gpu)
 
+    def set_state(self, state: str):
+        """Adaptive FPS: full rate while active, throttled while idle/sleeping."""
+        self._state = state
+
     def _step(self):
+        # Adaptive FPS (mirrors HudCanvas) — the radar sweep is barely visible
+        # when nothing is happening, so throttle it to save CPU.
+        _st = self._state
+        if _st in ("SPEAKING", "THINKING", "PROCESSING"):
+            _target = 50
+        elif _st in ("SLEEPING", "STANDBY"):
+            _target = 250
+        else:
+            _target = 80
+        if self._tmr.interval() != _target:
+            self._tmr.setInterval(_target)
+
         self._tick += 1
         self._scan_angle = (self._scan_angle + 1.8) % 360
         # Fade blips
@@ -1350,6 +1505,7 @@ class ScanLineOverlay(QWidget):
         self._scan_pos = 0.0
         self._scan_dir = 1.0
         self._paused   = False
+        self._state    = "INITIALISING"   # drives adaptive FPS (see set_state)
         self._tmr = QTimer(self)
         self._tmr.timeout.connect(self._step)
         self._tmr.start(30)
@@ -1360,7 +1516,23 @@ class ScanLineOverlay(QWidget):
     def resume(self):
         self._paused = False
 
+    def set_state(self, state: str):
+        """Adaptive FPS: full rate while active, throttled while idle/sleeping."""
+        self._state = state
+
     def _step(self):
+        # Adaptive FPS (mirrors HudCanvas) — the scan line moves slowly, so it can
+        # run at a lower rate whenever the assistant is not actively animating.
+        # Placed before the paused guard so a paused widget also drops its rate.
+        _st = self._state
+        if _st in ("SPEAKING", "THINKING", "PROCESSING"):
+            _target = 30
+        elif _st in ("SLEEPING", "STANDBY"):
+            _target = 250
+        else:
+            _target = 50
+        if self._tmr.interval() != _target:
+            self._tmr.setInterval(_target)
         if self._paused:
             return
         # Guard against parent() returning None (would crash on .width()/.height())
@@ -1434,6 +1606,7 @@ class LogWidget(QTextEdit):
         """)
         self._queue: list[str] = []
         self._typing  = False
+        self._paused  = False          # frozen typewriter (panel collapsed)
         self._text    = ""
         self._pos     = 0
         self._tag     = "sys"
@@ -1445,12 +1618,35 @@ class LogWidget(QTextEdit):
     def append_log(self, text: str):
         self._sig.emit(text)
 
+    def pause(self):
+        """Freeze the typewriter mid-message — used while the ACTIVITY LOG panel
+        is collapsed. New messages keep queueing and typing resumes on resume()."""
+        self._paused = True
+        self._tmr.stop()
+
+    def resume(self):
+        """Unfreeze the typewriter; queued messages continue typing. When a
+        message is fully typed but the next one hasn't started yet (a 20 ms
+        gap), we leave the pending singleShot to advance instead of restarting
+        the timer — restarting there would re-type the newline and could skip
+        a queued message."""
+        self._paused = False
+        if self._typing:
+            if self._pos < len(self._text):
+                self._tmr.start(16)   # mid-message → continue typing
+        elif self._queue:
+            self._next()
+
     def _enqueue(self, text: str):
-        self._queue.append(text)
-        if not self._typing:
+        if len(self._queue) < 200:     # safety cap while paused
+            self._queue.append(text)
+        if not self._typing and not self._paused:
             self._next()
 
     def _next(self):
+        if self._paused:               # frozen — resume() will restart typing
+            self._typing = False
+            return
         if not self._queue:
             self._typing = False
             return
@@ -1464,9 +1660,12 @@ class LogWidget(QTextEdit):
         elif tl.startswith("file:"):                             self._tag = "file"
         elif "err" in tl:                                        self._tag = "err"
         else:                                                    self._tag = "sys"
-        self._tmr.start(6)
+        self._tmr.start(16)   # 6 ms was 166 fps of QTextEdit redraws — 16 ms is plenty
 
     def _step(self):
+        if self._paused:
+            self._tmr.stop()
+            return
         if self._pos < len(self._text):
             ch  = self._text[self._pos]
             cur = self.textCursor()
@@ -1540,7 +1739,7 @@ class FileDropZone(QWidget):
         self._dash_offset = 0.0
         self._anim_tmr = QTimer(self)
         self._anim_tmr.timeout.connect(self._animate)
-        self._anim_tmr.start(40)
+        # Started on hover/drag only — no perpetual 25 fps redraw while idle.
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -1551,16 +1750,40 @@ class FileDropZone(QWidget):
         self._dash_offset = (self._dash_offset + 0.8) % 20
         self._canvas.update()
 
+    def _start_anim(self):
+        if not self._anim_tmr.isActive():
+            self._anim_tmr.start(40)
+
+    def _stop_anim(self):
+        if self._anim_tmr.isActive():
+            self._anim_tmr.stop()
+
+    def enterEvent(self, e):
+        self._hovering = True
+        self._start_anim()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self._hovering = False
+        if not self._drag_over:
+            self._stop_anim()
+        super().leaveEvent(e)
+
     def dragEnterEvent(self, e: QDragEnterEvent):
         if e.mimeData().hasUrls():
             e.acceptProposedAction()
-            self._drag_over = True; self._canvas.update()
+            self._drag_over = True
+            self._start_anim()
+            self._canvas.update()
 
     def dragLeaveEvent(self, e):
-        self._drag_over = False; self._canvas.update()
+        self._drag_over = False
+        self._stop_anim()   # re-enter re-starts it via dragEnterEvent
+        self._canvas.update()
 
     def dropEvent(self, e: QDropEvent):
         self._drag_over = False
+        self._stop_anim()
         urls = e.mimeData().urls()
         if urls:
             path = urls[0].toLocalFile()
@@ -2667,10 +2890,12 @@ class MainWindow(QMainWindow):
     _camera_sig     = pyqtSignal(bytes)      # show camera frame preview (small overlay)
     _cam_stream_sig = pyqtSignal(bool)       # True=start live stream, False=stop
     _cam_frame_sig  = pyqtSignal(bytes)      # live camera frame → HUD area
+    _sense_sig      = pyqtSignal(str, str, str, bool)  # (label, ambient, scene, privacy)
     _clipboard_sig  = pyqtSignal(str)        # clipboard text changed (thread-safe)
     _quit_sig       = pyqtSignal()           # graceful shutdown from any thread
     _vu_sig         = pyqtSignal(float)      # mic VU level 0..1 (thread-safe)
     _notify_sig     = pyqtSignal(str, str)   # desktop notification (title, msg)
+    _dash_sig       = pyqtSignal(bool)       # dashboard client-connected state (thread-safe)
 
     def __init__(self, face_path: str):
         super().__init__()
@@ -2806,6 +3031,7 @@ class MainWindow(QMainWindow):
         self._update_boot_sound_btn(_gbse())
         self._update_proactive_btn(_gpe())
         self._update_background_wake_btn(self._check_background_wake())
+        self._ensure_background_wake_listener()
         _voice = _gv()
         self._voice_combo.blockSignals(True)
         self._voice_combo.setCurrentText(_voice if _voice in _GEMINI_VOICES else "Charon")
@@ -2820,6 +3046,7 @@ class MainWindow(QMainWindow):
         self._metric_tmr = QTimer(self)
         self._metric_tmr.timeout.connect(self._update_metrics)
         self._metric_tmr.start(2000)
+        self._apply_metrics_interval()
         self._update_metrics()
 
         self._sess_logs = 0
@@ -2831,11 +3058,28 @@ class MainWindow(QMainWindow):
         self._camera_sig.connect(self._show_camera_frame)
         self._cam_stream_sig.connect(self._on_cam_stream)
         self._cam_frame_sig.connect(self._on_cam_frame)
+        self._sense_sig.connect(self._on_sense_state)
+        self._start_sensing()        # engine start deferred until signals are live
         self._clipboard_sig.connect(self._show_clipboard_panel)
         self._quit_sig.connect(self._quit_app)
         self._vu_sig.connect(self._set_vu)
         self._notify_sig.connect(self._show_toast)
         self._cam_stop = threading.Event()
+        self._cam_win_state = "active"   # updated by changeEvent (camera thread reads it)
+        self._cam_on = False             # True while the live camera stream is running
+        self._dash_live: bool | None = None   # None = dashboard disabled, else client-connected
+
+        # Adaptive-FPS indicator (child of central widget, positioned in resizeEvent)
+        self._perf_badge = _PerfBadge("◈ CAM OFF · DASH N/A")
+        self._perf_badge.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        self._perf_badge.setStyleSheet(
+            "color: %s; background: rgba(0, 6, 10, 210);"
+            "border: 1px solid %s; border-radius: 3px; padding: 2px 6px;"
+            % (C.TEXT_DIM, C.BORDER_B)
+        )
+        self._perf_badge.adjustSize()
+        self._perf_badge.clicked.connect(self._toggle_camera_sensing)
+        self._dash_sig.connect(self._on_dash_state)
 
         # Camera preview overlay (child of central widget, positioned in resizeEvent)
         self._cam_preview = _CameraPreview(self.centralWidget())
@@ -3039,6 +3283,12 @@ class MainWindow(QMainWindow):
                 windll.user32.UnregisterHotKey(None, self._hotkey_id)
         except Exception:
             pass
+        try:
+            # release the camera handle so Windows doesn't hold the device open
+            if getattr(self, "_sense_engine", None) is not None:
+                self._sense_engine.stop()
+        except Exception:
+            pass
         self._tray_icon.hide()
         QApplication.quit()
 
@@ -3049,6 +3299,47 @@ class MainWindow(QMainWindow):
             event.ignore()
         else:
             event.accept()
+
+    def _sync_win_state(self):
+        """Recompute the window tier and fan it out to every adaptive consumer
+        (camera stream, perf badge, psutil poll + metrics UI refresh,
+        camera sensing)."""
+        try:
+            if not self.isVisible() or self.isMinimized():
+                self._cam_win_state = "hidden"
+            elif self.isActiveWindow():
+                self._cam_win_state = "active"
+            else:
+                self._cam_win_state = "background"
+            self._apply_metrics_interval()   # also refreshes the perf badge
+            if getattr(self, "_sense_engine", None) is not None:
+                self._sense_engine.set_tier(self._cam_win_state)
+        except Exception:
+            pass
+
+    def changeEvent(self, event):
+        """Track window visibility/focus so the camera stream and psutil poll
+        can adapt (full rate only when the window is focused and visible)."""
+        super().changeEvent(event)
+        try:
+            if event.type() in (QEvent.Type.WindowStateChange,
+                                QEvent.Type.ActivationChange,
+                                QEvent.Type.Show, QEvent.Type.Hide):
+                self._sync_win_state()
+        except Exception:
+            pass
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        try:
+            self._sync_win_state()
+            self._update_metrics()   # fresh readings the moment the panel is visible again
+        except Exception:
+            pass
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._sync_win_state()
 
     def _sync_tray_state(self):
         """Update tray icon tooltip and menu items to reflect current state."""
@@ -3080,13 +3371,137 @@ class MainWindow(QMainWindow):
             pw, ph,
         )
 
+    # --- Adaptive-FPS indicator (camera tier + dashboard link state) --------
+    def _refresh_perf_badge(self) -> None:
+        """Update the HUD adaptive-FPS chip from the camera/dashboard/metrics state."""
+        try:
+            cam_tier = getattr(self, "_cam_win_state", "active")
+            poll_secs = _metrics_interval(
+                cam_tier, getattr(self, "_left_metrics_visible", True))
+            eng = getattr(self, "_sense_engine", None)
+            sense_lbl, sense_col = _sense_badge_segment(
+                getattr(self, "_sense_snap", None))
+            if not sense_lbl:
+                # The chip doubles as the runtime camera-sensing toggle, so it
+                # always shows a neutral marker: IDLE while the engine actually
+                # runs (nothing detected yet), OFF when disabled or the engine
+                # thread died (click to enable / restart).
+                if eng is not None and eng.running:
+                    sense_lbl, sense_col = "SENSE IDLE", C.TEXT_DIM
+                else:
+                    sense_lbl, sense_col = "SENSE OFF", C.TEXT_DIM
+            label, col = _perf_badge_text(cam_tier, self._cam_on, self._dash_live,
+                                          poll_secs, sense_lbl, sense_col)
+            self._perf_badge.setText(label)
+            self._perf_badge.setStyleSheet(
+                "color: %s; background: rgba(0, 6, 10, 210);"
+                "border: 1px solid %s; border-radius: 3px; padding: 2px 6px;"
+                % (col, C.BORDER_B)
+            )
+            self._perf_badge.adjustSize()
+            sense_line = self._sense_tip() if getattr(self, "_sense_snap", None) else ""
+            if not sense_line:
+                if eng is not None and eng.running:
+                    sense_line = "Camera sensing: active — click the chip to disable"
+                else:
+                    sense_line = "Camera sensing: off — click the chip to enable"
+            self._perf_badge.setToolTip(
+                self._perf_badge_tip(cam_tier, self._cam_on, self._dash_live,
+                                     poll_secs, sense_line))
+            self._place_perf_badge()
+            # Always on screen: the chip is a clickable toggle, so the affordance
+            # must stay visible even when everything is idle (previously it hid).
+            self._perf_badge.show()
+        except Exception:
+            pass
+
+    def _sense_tip(self) -> str:
+        """Tooltip line describing the camera-sensing chip segment."""
+        snap = getattr(self, "_sense_snap", None)
+        try:
+            if snap is None:
+                return ""
+            amb = snap.ambient
+            if getattr(snap, "privacy", False):
+                return ("Camera sensing: privacy mode — local detection only. "
+                        "No frame is sent off-device.")
+            if snap.person:
+                top = "Camera sensing: person present"
+            elif snap.motion:
+                top = "Camera sensing: motion detected"
+            else:
+                top = "Camera sensing: idle"
+            if amb in ("dark", "dim"):
+                top += f" · ambient {amb}"
+            if snap.scene:
+                top += f" · scene: {snap.scene[:60]}"
+            return top
+        except Exception:
+            return ""
+
+    def _perf_badge_tip(self, cam_tier: str, cam_on: bool, dash_live: bool | None,
+                        poll_secs: float = 1.5, sense_line: str = "") -> str:
+        """Human-readable explanation of the chip's current adaptive-FPS tiers."""
+        if cam_on:
+            cam = {
+                "active": "Camera: full 30 fps (window focused)",
+                "background": "Camera: 10 fps (window in background)",
+                "hidden": "Camera: warm, frames not decoded (window hidden)",
+            }.get(cam_tier, "Camera: unknown tier")
+        else:
+            cam = "Camera: stream off"
+        if dash_live is None:
+            dash = "Dashboard: server disabled"
+        else:
+            dash = "Dashboard: client connected - live" if dash_live \
+                else "Dashboard: no clients - idle"
+        poll = f"System monitor: polling every {poll_secs:g}s"
+        tip = "Adaptive power saving - low-spec friendly\n" + cam \
+            + "\n" + dash + "\n" + poll
+        if sense_line:
+            tip += "\n" + sense_line
+        tip += "\nClick the chip to toggle camera sensing."
+        return tip
+
+    def _place_perf_badge(self) -> None:
+        """Pin the badge to the top-left of the HUD/camera stack area."""
+        try:
+            cw = self.centralWidget()
+            pw = self._perf_badge.width()
+            ph = self._perf_badge.height()
+            # Center column sits between the left panel (148) and right panel (340);
+            # top-left corner of that column, with a small margin.
+            x = _LEFT_W + 14
+            y = 12
+            if self._cam_on:
+                # Camera page has a header bar — drop the chip below it.
+                y = 40
+            self._perf_badge.setGeometry(x, y, pw, ph)
+            self._perf_badge.raise_()
+        except Exception:
+            pass
+
+    def set_dashboard_state(self, live: bool | None) -> None:
+        """Thread-safe: called from main.py's asyncio loop to report whether a
+        dashboard client is connected. Only emits when the value changes, so
+        the 0.5–2.5 s poll loop doesn't spam the GUI thread."""
+        new = None if live is None else bool(live)
+        if new != getattr(self, "_dash_live", None):
+            self._dash_live = new
+            self._dash_sig.emit(bool(new))  # queued to GUI thread
+
+    def _on_dash_state(self, live: bool) -> None:
+        self._refresh_perf_badge()
+
     # --- Live camera stream in HUD area ------------------------------------
     def _on_cam_stream(self, start: bool) -> None:
+        self._cam_on = bool(start)
         if start:
             self._hud_cam_stack.setCurrentIndex(1)
         else:
             self._hud_cam_stack.setCurrentIndex(0)
             self._cam_live_lbl.clear()
+        self._refresh_perf_badge()
 
     def _on_cam_frame(self, data: bytes) -> None:
         px = QPixmap()
@@ -3101,6 +3516,10 @@ class MainWindow(QMainWindow):
                 )
 
     def start_camera_stream(self) -> None:
+        # Idempotent: a stopped stream leaves the event set; a running one has
+        # it cleared. Calling open_camera twice must not spawn a second thread.
+        if not self._cam_stop.is_set():
+            return
         self._cam_stop.clear()
         self._cam_stream_sig.emit(True)
         t = threading.Thread(target=self._cam_loop, daemon=True, name="cam-stream")
@@ -3129,11 +3548,19 @@ class MainWindow(QMainWindow):
             # warm-up frames
             for _ in range(5):
                 cap.read()
-            while not self._cam_stop.wait(0.033) and cap.isOpened():
+            while not self._cam_stop.is_set() and cap.isOpened():
+                interval, quality = _camera_tier(getattr(self, "_cam_win_state", "active"))
+                if quality < 0:
+                    # Window hidden/minimised — keep the camera warm without
+                    # decoding or encoding a single frame (near-zero CPU).
+                    cap.grab()
+                    self._cam_stop.wait(interval)
+                    continue
                 ret, frame = cap.read()
                 if ret and frame is not None:
-                    _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
+                    _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
                     self._cam_frame_sig.emit(buf.tobytes())
+                self._cam_stop.wait(interval)
             cap.release()
         except Exception as e:
             print(f"[Camera] Stream error: {e}")
@@ -3142,6 +3569,171 @@ class MainWindow(QMainWindow):
 
     def stop_camera_stream(self) -> None:
         self._cam_stop.set()
+
+    # ------------------------------------------------------------------
+    # Camera sensing (motion / person / ambient + optional AI scene)
+    # ------------------------------------------------------------------
+    def _start_sensing(self, force: bool = False) -> None:
+        """Start the background camera-sensing engine if enabled in config.
+
+        ``force=True`` skips the config check — used by the HUD chip toggle to
+        start sensing at runtime. Lazy-imports OpenCV (keeps startup fast on
+        low-spec machines) and never raises — a missing/unusable camera simply
+        means sensing stays off. Privacy mode (config) disables the AI scene
+        hook entirely.
+        """
+        try:
+            if getattr(self, "_sense_engine", None) is not None:
+                return
+            from memory.config_manager import (
+                get_camera_sensing_enabled, get_camera_sensing_privacy)
+            if not force and not get_camera_sensing_enabled():
+                return
+            from actions.camera_sense import CameraSenseEngine
+            privacy = bool(get_camera_sensing_privacy())
+            analyzer = None
+            if not privacy and self._sensing_scene_ai_enabled():
+                analyzer = self._analyze_scene
+            eng = CameraSenseEngine(
+                on_state=self._emit_sense_state,
+                on_event=self._emit_sense_event,
+                scene_analyzer=analyzer,
+                privacy=privacy,
+            )
+            self._sense_engine = eng  # visible to _analyze_scene before start
+            self._sense_active = True  # accept state signals from this engine
+            eng.set_tier(getattr(self, "_cam_win_state", "active"))
+            eng.start()
+            mode = "privacy (local only)" if privacy else "motion, person & ambient"
+            self._log.append_log(f"SYS: Camera sensing enabled — {mode}.")
+        except Exception as e:
+            print(f"[Sense] ⚠️ Sensing start failed: {e}")
+
+    def _toggle_camera_sensing(self) -> None:
+        """HUD chip click → flip camera sensing on/off, persisted via config."""
+        if getattr(self, "_sense_engine", None) is not None:
+            self._disable_sensing()
+        else:
+            self._enable_sensing()
+
+    def _enable_sensing(self) -> None:
+        """Turn camera sensing on now (runtime) and persist the choice."""
+        try:
+            from memory.config_manager import save_camera_sensing_enabled
+            save_camera_sensing_enabled(True)
+            self._start_sensing(force=True)
+            if getattr(self, "_sense_engine", None) is None:
+                # engine failed to come up (no camera / driver issue) — roll back
+                save_camera_sensing_enabled(False)
+                self._log.append_log(
+                    "ERR: Camera sensing unavailable — no camera detected.")
+            self._refresh_perf_badge()
+        except Exception:
+            pass
+
+    def _disable_sensing(self) -> None:
+        """Stop the sensing engine, release the camera, persist the choice."""
+        try:
+            from memory.config_manager import save_camera_sensing_enabled
+            self._sense_active = False     # drop any already-queued state signals
+            try:
+                self._sense_engine.stop()  # releases the camera handle
+            except Exception:
+                pass
+            self._sense_engine = None
+            self._sense_snap = None
+            save_camera_sensing_enabled(False)
+            self._log.append_log("SYS: Camera sensing disabled.")
+            self._refresh_perf_badge()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _sensing_scene_ai_enabled() -> bool:
+        try:
+            from memory.config_manager import get_camera_sensing_scene_ai
+            return bool(get_camera_sensing_scene_ai())
+        except Exception:
+            return False
+
+    def _emit_sense_state(self, snap) -> None:
+        """Engine-thread callback → queued Qt signal (safe from any thread).
+
+        Emits structured data (label + ambient + scene + privacy) so the
+        main-thread slot never touches engine state directly.
+        """
+        try:
+            self._sense_sig.emit(
+                snap.label(), snap.ambient, snap.scene,
+                bool(getattr(snap, "privacy", False)))
+        except Exception:
+            pass
+
+    def _emit_sense_event(self, text: str) -> None:
+        """Engine-thread callback → queued Qt signal (safe from any thread)."""
+        try:
+            self._log_sig.emit(text)
+        except Exception:
+            pass
+
+    def _on_sense_state(self, label: str, ambient: str, scene: str,
+                        privacy: bool = False) -> None:
+        """Main-thread slot — update the HUD chip when sensing state changes.
+
+        Receives only structured data from the signal (never touches the
+        engine thread's live snapshot), so no cross-thread state is read.
+        """
+        try:
+            if not getattr(self, "_sense_active", True):
+                return          # engine stopped — ignore stale queued events
+            from actions.camera_sense import SensorSnapshot
+            self._sense_snap = SensorSnapshot(
+                motion="MOTION" in label and "PERSON" not in label,
+                person="PERSON" in label,
+                ambient=ambient,
+                scene=str(scene)[:240],
+                privacy=bool(privacy),
+            )
+            self._refresh_perf_badge()
+        except Exception:
+            pass
+
+    def _analyze_scene(self, frame=None) -> str:
+        """Engine-thread hook — describe the room via the Gemini vision model.
+
+        Uses the engine's most recent frame (no second camera handle — avoids
+        DSHOW contention on Windows). Runs in the sensing thread (blocking,
+        throttled by the engine), so imports stay lazy.
+        """
+        try:
+            from actions.screen_processor import _compress
+            import cv2 as _cv2
+            if frame is None:
+                frame = getattr(self._sense_engine, "_last_frame", None)
+            if frame is None:
+                return "(scene unavailable: no frame)"
+            ok, buf = _cv2.imencode(".jpg", frame,
+                                    [_cv2.IMWRITE_JPEG_QUALITY, 55])
+            if not ok:
+                return "(scene unavailable: encode failed)"
+            small_b = buf.tobytes()
+            from utils import get_api_key, LIVE_MODEL as _VM
+            from google import genai
+            client = genai.Client(api_key=get_api_key())
+            resp = client.models.generate_content(
+                model=_VM,
+                contents=[
+                    "Describe this room in ONE short sentence (max 15 words) "
+                    "for an ambient-awareness log. Mention lighting if notable. "
+                    "Do not mention the user's identity.",
+                    genai.types.Part.from_bytes(
+                        data=small_b, mime_type="image/jpeg"),
+                ],
+            )
+            text = "".join(p.text or "" for p in resp.candidates[0].content.parts)
+            return text.strip()
+        except Exception as e:
+            return f"(scene unavailable: {e})"
 
     # ------------------------------------------------------------------
     # Icon generation — arc-reactor style, rendered with Pillow
@@ -3557,6 +4149,10 @@ class MainWindow(QMainWindow):
                 max((cw.height() - oh) // 2, 0),
                 ow, oh,
             )
+        # Adaptive-FPS indicator — top-left of the center/HUD area
+        if hasattr(self, '_perf_badge'):
+            self._place_perf_badge()
+
         # Camera preview — bottom-right corner of the center/HUD area
         pw = _CameraPreview._W
         ph = self._cam_preview.height() or _CameraPreview._H
@@ -3580,6 +4176,66 @@ class MainWindow(QMainWindow):
             self.hud.state = "LISTENING"
             self.hud._halo = 80
             self.hud._tgt_halo = 80
+
+    def _apply_metrics_interval(self):
+        """Adaptive psutil throttling: the poll loop and the metrics UI refresh
+        run at full cadence only while the SYS MONITOR panel is on screen; they
+        drop to a slow tick when the panel is collapsed or the window is
+        hidden/backgrounded (mirrors the HUD/camera adaptive-FPS tiers)."""
+        try:
+            win_tier = getattr(self, "_cam_win_state", "active")
+            visible = getattr(self, "_left_metrics_visible", True)
+            secs = _metrics_interval(win_tier, visible)
+            _metrics.set_interval(secs)
+            ui_ms = 2000 if secs <= 1.5 else int(secs * 1000)
+            self._metric_tmr.start(ui_ms)
+            if getattr(self, "_perf_badge", None) is not None:
+                self._refresh_perf_badge()   # keep the chip's POLL tier in sync
+        except Exception:
+            pass
+
+    def _toggle_metrics_panel(self):
+        """Collapse/expand the SYS MONITOR column. While collapsed, the psutil
+        poll loop and metrics refresh drop to the slowest tier."""
+        try:
+            box = getattr(self, "_left_metrics_box", None)
+            if box is None:
+                return
+            self._left_metrics_visible = not self._left_metrics_visible
+            box.setVisible(self._left_metrics_visible)
+            arrow = "▾" if self._left_metrics_visible else "▸"
+            self._metrics_toggle.setText(f"◈ SYS MONITOR  {arrow}")
+            # Live behavior first — a failed disk write must never leave the
+            # poll tier stale; persistence is best-effort and saved last.
+            self._apply_metrics_interval()
+            if self._left_metrics_visible:
+                self._update_metrics()   # fresh readings the moment the panel is back
+            from memory.config_manager import save_metrics_panel_collapsed
+            save_metrics_panel_collapsed(not self._left_metrics_visible)
+        except Exception:
+            pass
+
+    def _toggle_log_panel(self):
+        """Collapse/expand the ACTIVITY LOG section. While collapsed, the log's
+        typewriter is paused and the header clock stops ticking; both resume and
+        refresh instantly when the log is expanded again."""
+        try:
+            log = getattr(self, "_log", None)
+            if log is None or not hasattr(self, "_log_toggle"):
+                return
+            self._log_panel_visible = not self._log_panel_visible
+            log.setVisible(self._log_panel_visible)
+            pfx = "▾" if self._log_panel_visible else "▸"
+            self._log_toggle.setText(f"{pfx} ACTIVITY LOG")
+            if self._log_panel_visible:
+                log.resume()
+                self._clock_tmr.start(1000)
+                self._tick_clock()
+            else:
+                log.pause()
+                self._clock_tmr.stop()
+        except Exception:
+            pass
 
     def _update_metrics(self):
         snap = _metrics.snapshot()
@@ -3727,19 +4383,41 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(8, 10, 8, 10)
         lay.setSpacing(6)
 
-        hdr = QLabel("◈ SYS MONITOR")
-        hdr.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
-        hdr.setStyleSheet(f"color: {C.PRI}; background: transparent; "
-                          f"border-bottom: 1px solid {C.BORDER}; padding-bottom: 4px;")
-        lay.addWidget(hdr)
+        # Collapsible header — clicking it hides the gauges below (and the psutil
+        # poll loop slows to match, saving CPU on low-spec machines). The
+        # collapsed state persists across restarts via the config manager.
+        from memory.config_manager import get_metrics_panel_collapsed
+        self._left_metrics_visible = not get_metrics_panel_collapsed()
+        self._metrics_toggle = QPushButton(
+            "◈ SYS MONITOR  ▾" if self._left_metrics_visible else "◈ SYS MONITOR  ▸")
+        self._metrics_toggle.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        self._metrics_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._metrics_toggle.setToolTip("Collapse the system monitor — also slows "
+                                        "its CPU/GPU/RAM polling to save power.")
+        self._metrics_toggle.setStyleSheet(
+            f"QPushButton {{ color: {C.PRI}; background: transparent; border: none; "
+            f"border-bottom: 1px solid {C.BORDER}; padding: 0 0 4px 0; text-align: left; }}"
+            f"QPushButton:hover {{ color: {C.ACC2}; }}"
+        )
+        self._metrics_toggle.clicked.connect(self._toggle_metrics_panel)
+        lay.addWidget(self._metrics_toggle)
         lay.addSpacing(2)
+
+        # Everything below collapses into a single box the toggle can hide.
+        box = QWidget()
+        self._left_metrics_box = box
+        blay = QVBoxLayout(box)
+        blay.setContentsMargins(0, 0, 0, 0)
+        blay.setSpacing(6)
+        lay.addWidget(box)
+        box.setVisible(self._left_metrics_visible)
 
         # ── Radar / Sonar visualization ─────────────────────────────────────
         self._radar = RadarWidget()
         self._radar.setMinimumSize(140, 140)
-        lay.addWidget(self._radar, alignment=Qt.AlignmentFlag.AlignCenter)
+        blay.addWidget(self._radar, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        lay.addSpacing(2)
+        blay.addSpacing(2)
 
         # Compact info bar below radar
         info_bar = QWidget()
@@ -3775,9 +4453,9 @@ class MainWindow(QMainWindow):
         self._msg_lbl.setStyleSheet(f"color: {C.PRI}; background: transparent; border: none;")
         ip_lay.addWidget(self._msg_lbl)
 
-        lay.addWidget(info_bar)
+        blay.addWidget(info_bar)
 
-        lay.addSpacing(2)
+        blay.addSpacing(2)
 
         # ── Live gauge bars (CPU / RAM / GPU / NET / TMP) ────────────────────
         self._metric_bars: dict[str, MetricBar] = {}
@@ -3786,7 +4464,7 @@ class MainWindow(QMainWindow):
             bar = MetricBar(label, color=color)
             bar.setFixedHeight(26)
             self._metric_bars[key] = bar
-            lay.addWidget(bar)
+            blay.addWidget(bar)
             return bar
 
         _gauge("cpu", "CPU", C.PRI)
@@ -3795,7 +4473,7 @@ class MainWindow(QMainWindow):
         _gauge("net", "NET", C.GREEN)
         _gauge("tmp", "TMP", C.ORANGE)
 
-        lay.addSpacing(1)
+        blay.addSpacing(1)
 
         return w
     def _build_right_panel(self) -> QWidget:
@@ -3812,7 +4490,21 @@ class MainWindow(QMainWindow):
             l.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
             return l
 
-        lay.addWidget(_sec("ACTIVITY LOG"))
+        # Collapsible ACTIVITY LOG — clicking the header hides the log and pauses
+        # its typewriter + the header clock until it's expanded again.
+        self._log_panel_visible = True
+        self._log_toggle = QPushButton("▾ ACTIVITY LOG")
+        self._log_toggle.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        self._log_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._log_toggle.setToolTip("Collapse the activity log — pauses its "
+                                    "typewriter and the header clock while hidden.")
+        self._log_toggle.setStyleSheet(
+            f"QPushButton {{ color: {C.TEXT_MED}; background: transparent; border: none; "
+            f"border-bottom: 1px solid {C.BORDER}; padding: 0 0 4px 0; text-align: left; }}"
+            f"QPushButton:hover {{ color: {C.PRI}; }}"
+        )
+        self._log_toggle.clicked.connect(self._toggle_log_panel)
+        lay.addWidget(self._log_toggle)
         self._log = LogWidget()
         lay.addWidget(self._log, stretch=1)
 
@@ -4002,11 +4694,17 @@ class MainWindow(QMainWindow):
         lay.addWidget(ag_hdr)
 
         for _label, _agent in (
-            ("🧠  RESEARCH", "research"),
-            ("🌐  WEB",      "web"),
-            ("💻  CODE",     "code"),
-            ("📁  FILE",     "file"),
-            ("🔧  SYSTEM",   "system"),
+            ("🧠  RESEARCH",       "research"),
+            ("🌐  WEB",            "web"),
+            ("💻  CODE",           "code"),
+            ("📁  FILE",           "file"),
+            ("🔧  SYSTEM",         "system"),
+            ("🎨  MEDIA",          "media"),
+            ("💰  FINANCE",        "finance"),
+            ("🌍  TRANSLATE",      "translate"),
+            ("📝  PRODUCTIVITY",   "productivity"),
+            ("✈️  TRAVEL",         "travel"),
+            ("🖥️  APPS",           "apps"),
         ):
             _b = QPushButton(_label)
             _b.setFixedHeight(26)
@@ -4563,18 +5261,51 @@ class MainWindow(QMainWindow):
         except Exception:
             return False
 
+    def _ensure_background_wake_listener(self):
+        """Self-heal: if wake-from-closed is registered but the listener is not
+        running (crashed, or enabled before a reboot), restart it silently."""
+        try:
+            if not self._check_background_wake():
+                return
+            from actions.background_wake import _listener_pids, start_listener
+            if _listener_pids():
+                return
+            pid = start_listener()
+            if pid:
+                _log = getattr(self, "_log", None)
+                if _log is not None:
+                    _log.append_log(f"SYS: Wake-from-closed listener restarted (pid {pid}).")
+        except Exception:
+            pass
+
     def _toggle_background_wake(self):
-        from actions.background_wake import register_startup, unregister_startup
+        from actions.background_wake import (
+            register_startup, unregister_startup, start_listener, stop_listener,
+        )
         from memory.config_manager import save_background_wake_enabled
         enabled = not self._check_background_wake()
-        ok = register_startup() if enabled else unregister_startup()
-        if ok:
-            save_background_wake_enabled(enabled)
-            self._update_background_wake_btn(enabled)
-            self._log.append_log(
-                f"SYS: Wake-from-closed {'enabled — say the wake word anytime' if enabled else 'disabled'}.")
+        if enabled:
+            ok = register_startup()
+            if ok:
+                pid = start_listener()
+                save_background_wake_enabled(True)
+                self._update_background_wake_btn(True)
+                extra = f" Listener live (pid {pid})." if pid else \
+                        " Listener starts at next login."
+                self._log.append_log(
+                    "SYS: Wake-from-closed enabled — say the wake word anytime." + extra)
+            else:
+                self._log.append_log("ERR: Failed to update the wake-from-closed startup entry.")
         else:
-            self._log.append_log("ERR: Failed to update the wake-from-closed startup entry.")
+            ok = unregister_startup()
+            stopped = stop_listener()
+            if ok:
+                save_background_wake_enabled(False)
+                self._update_background_wake_btn(False)
+                extra = " Listener stopped." if stopped else ""
+                self._log.append_log("SYS: Wake-from-closed disabled." + extra)
+            else:
+                self._log.append_log("ERR: Failed to update the wake-from-closed startup entry.")
 
     def _update_background_wake_btn(self, enabled: bool):
         if not hasattr(self, '_background_wake_btn'):
@@ -4817,6 +5548,14 @@ class MainWindow(QMainWindow):
     def _apply_state(self, state: str):
         self.hud.state    = state
         self.hud.speaking = (state == "SPEAKING")
+        # Propagate to the radar + scan-line so they can throttle their animation
+        # rate while the assistant is idle (adaptive FPS).
+        _radar = getattr(self, '_radar', None)
+        if _radar is not None:
+            _radar.set_state(state)
+        _scan = getattr(self, '_scan_line', None)
+        if _scan is not None:
+            _scan.set_state(state)
         if hasattr(self, '_tray_icon') and self._tray_icon.isVisible():
             self._tray_icon.setToolTip(
                 f"{self._assistant_name} — MARK XLIX\nState: {state}"

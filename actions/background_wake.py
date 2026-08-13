@@ -324,14 +324,29 @@ def launch_jarvis(log: logging.Logger) -> int | None:
 # ── Listener loop ──────────────────────────────────────────────────────────────
 
 
-def _listener_running(exclude_pid: int | None = None) -> bool:
-    """True if another instance of this listener is already active."""
+def _listener_pids() -> list[int]:
+    """PIDs of running instances of this listener (excluding the current process)."""
+    pids: list[int] = []
     try:
         import psutil
         me = Path(__file__).resolve()
-        for p in psutil.process_iter(["cmdline", "pid"]):
+        self_pid = os.getpid()
+        # uv-style venvs ship pythonw.exe as a *launcher shim* that spawns the
+        # real interpreter (e.g. ~/AppData/Roaming/uv/python/...) as a child.
+        # The listener code then runs in the child while the shim parent keeps
+        # the same cmdline — naïvely counting both makes the child think a
+        # second listener exists and exit. Exclude our own parent/children.
+        parent_pid = None
+        try:
+            parent_pid = psutil.Process(self_pid).ppid()
+        except Exception:
+            pass
+        for p in psutil.process_iter(["cmdline", "pid", "ppid"]):
             try:
-                if p.info.get("pid") == exclude_pid:
+                pid = p.info.get("pid")
+                if pid is None or pid == self_pid or pid == parent_pid:
+                    continue
+                if p.info.get("ppid") == self_pid:
                     continue
                 args = p.cmdline()
                 if not args:
@@ -339,12 +354,62 @@ def _listener_running(exclude_pid: int | None = None) -> bool:
                 if Path(args[0]).resolve() == me or (
                     len(args) > 1 and Path(args[1]).resolve() == me
                 ):
-                    return True
+                    pids.append(pid)
             except Exception:
                 continue
     except Exception:
         pass
-    return False
+    return pids
+
+
+def _listener_running(exclude_pid: int | None = None) -> bool:
+    """True if another instance of this listener is already active."""
+    return any(pid != exclude_pid for pid in _listener_pids())
+
+
+# ── Starting / stopping the daemon on demand ───────────────────────────────────
+
+
+def start_listener() -> int | None:
+    """Launch the wake listener as a hidden, detached background process.
+
+    Returns the child PID on success, or None if the launch failed. The child
+    self-guards against duplicates (it exits if another listener is active), so
+    calling this repeatedly is safe.
+    """
+    try:
+        kwargs: dict = {}
+        if os.name == "nt":
+            kwargs["creationflags"] = CREATE_NO_WINDOW | DETACHED_PROCESS
+        proc = subprocess.Popen(
+            _listener_command(),
+            cwd=str(PROJECT_DIR),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **kwargs,
+        )
+        return proc.pid
+    except Exception:
+        return None
+
+
+def stop_listener() -> int:
+    """Terminate all running listener instances. Returns how many were stopped."""
+    killed = 0
+    for pid in _listener_pids():
+        try:
+            import psutil
+            p = psutil.Process(pid)
+            p.terminate()
+            try:
+                p.wait(timeout=3)
+            except Exception:
+                p.kill()
+            killed += 1
+        except Exception:
+            continue
+    return killed
 
 
 def _handle_detection(log: logging.Logger, launch: bool,

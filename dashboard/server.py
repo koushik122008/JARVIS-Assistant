@@ -585,9 +585,17 @@ class DashboardServer:
     def set_connect_callback(self, fn) -> None:
         self._connect_callback = fn
 
+    def has_clients(self) -> bool:
+        """True while at least one dashboard tab/phone is connected.
+        Lets the app skip broadcast work entirely while nobody is watching."""
+        return bool(self._clients)
+
     # ── broadcast ────────────────────────────────────────────────────────
 
     async def broadcast(self, msg: dict) -> None:
+        # History is O(1) and capped at 300 — keep it growing unconditionally so
+        # a phone connecting mid-session still gets the last-50 replay, even if
+        # JARVIS was chatting locally while nobody watched the dashboard.
         self._history.append(msg)
         if len(self._history) > 300:
             self._history = self._history[-300:]

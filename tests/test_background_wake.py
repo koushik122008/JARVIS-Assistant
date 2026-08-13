@@ -4,6 +4,7 @@ the Vosk keyword matcher in actions/wake_word.py, and the config helpers.
 """
 
 import os
+import subprocess
 import sys
 from unittest import mock
 
@@ -245,3 +246,114 @@ def test_startup_command_string_contains_listener():
     s = bw._startup_command_string()
     assert "background_wake.py" in s
     assert s.count('"') >= 4  # both exe and script quoted
+
+
+# ── Listener lifecycle (start / stop on demand) ────────────────────────────────
+
+
+def test_start_listener_launches_hidden_detached():
+    with mock.patch("subprocess.Popen") as popen:
+        popen.return_value.pid = 4242
+        pid = bw.start_listener()
+    assert pid == 4242
+    args, kwargs = popen.call_args
+    assert str(bw.PROJECT_DIR) in args[0][1]      # points at background_wake.py
+    assert kwargs["cwd"] == str(bw.PROJECT_DIR)
+    assert kwargs["stdin"] == subprocess.DEVNULL
+    assert kwargs["stdout"] == subprocess.DEVNULL
+    assert kwargs["stderr"] == subprocess.DEVNULL
+
+
+def test_start_listener_returns_none_on_failure():
+    with mock.patch("subprocess.Popen", side_effect=OSError("boom")):
+        assert bw.start_listener() is None
+
+
+def test_listener_pids_finds_instances():
+    class _P:
+        def __init__(self, pid, cmdline):
+            self._info = {"pid": pid, "cmdline": cmdline}
+            self.info = self._info
+
+        def cmdline(self):
+            return self._info["cmdline"]
+
+    procs = [
+        _P(1, [sys.executable, str(bw.__file__)]),
+        _P(2, [sys.executable, "other.py"]),
+    ]
+    with mock.patch("psutil.process_iter", return_value=procs):
+        pids = bw._listener_pids()
+    assert pids == [1]
+
+
+def test_listener_pids_skips_self(monkeypatch):
+    class _P:
+        def __init__(self, pid, cmdline):
+            self._info = {"pid": pid, "cmdline": cmdline}
+            self.info = self._info
+
+        def cmdline(self):
+            return self._info["cmdline"]
+
+    procs = [_P(os.getpid(), [sys.executable, str(bw.__file__)])]
+    with mock.patch("psutil.process_iter", return_value=procs):
+        assert bw._listener_pids() == []
+
+
+def test_listener_pids_skips_own_parent_shim_and_children():
+    """uv-venv quirk: pythonw.exe is a shim that spawns the real interpreter
+    as a child with the same cmdline — neither should count as a duplicate."""
+    class _P:
+        def __init__(self, pid, ppid, cmdline):
+            self._info = {"pid": pid, "ppid": ppid, "cmdline": cmdline}
+            self.info = self._info
+
+        def cmdline(self):
+            return self._info["cmdline"]
+
+    fake_self = mock.MagicMock()
+    fake_self.ppid.return_value = 4242
+    procs = [
+        _P(4242, 100, [sys.executable, str(bw.__file__)]),                 # our shim parent
+        _P(4243, os.getpid(), [sys.executable, str(bw.__file__)]),          # our own child
+        _P(4244, 999, [sys.executable, str(bw.__file__)]),                  # real duplicate
+    ]
+    with (
+        mock.patch("psutil.process_iter", return_value=procs),
+        mock.patch("psutil.Process", return_value=fake_self),
+    ):
+        assert bw._listener_pids() == [4244]
+
+
+def test_stop_listener_terminates_all_instances():
+    fake = mock.MagicMock()
+    with (
+        mock.patch.object(bw, "_listener_pids", return_value=[100, 200]),
+        mock.patch("psutil.Process", return_value=fake),
+    ):
+        killed = bw.stop_listener()
+    assert killed == 2
+    assert fake.terminate.call_count == 2
+    assert fake.wait.call_count == 2
+
+
+def test_stop_listener_force_kills_unresponsive():
+    fake = mock.MagicMock()
+    fake.wait.side_effect = Exception("timeout")
+    with (
+        mock.patch.object(bw, "_listener_pids", return_value=[100]),
+        mock.patch("psutil.Process", return_value=fake),
+    ):
+        killed = bw.stop_listener()
+    assert killed == 1
+    fake.kill.assert_called_once()
+
+
+def test_stop_listener_no_instances():
+    with (
+        mock.patch.object(bw, "_listener_pids", return_value=[]),
+        mock.patch("psutil.Process") as proc,
+    ):
+        assert bw.stop_listener() == 0
+    proc.assert_not_called()

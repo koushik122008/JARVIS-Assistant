@@ -31,7 +31,7 @@ class TestDiscovery(unittest.TestCase):
         builtins = {
             "generate_image", "open_app", "web_search", "system_status",
             "weather_report", "send_message", "reminder", "youtube_video",
-            "screen_process", "close_camera", "computer_settings",
+            "screen_process", "open_camera", "close_camera", "computer_settings",
             "browser_control", "file_controller", "desktop_control",
             "code_helper", "dev_agent", "computer_control", "game_updater",
             "flight_finder", "shutdown_jarvis", "file_processor",

@@ -37,6 +37,7 @@ config/certs/
 
 # ── Project-specific ────────────────────────────────────
 memory/long_term.json
+memory/quiz_state.json
 *.log
 JarvisProjects/
 screenshots/
